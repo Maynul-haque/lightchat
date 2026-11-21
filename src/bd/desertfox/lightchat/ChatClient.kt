@@ -35,15 +35,19 @@ object ChatClient {
     private const val CONNECT_MS = 15000L
     private const val FIRST_CHUNK_MS = 30000L
     private const val READ_MS = 60000L
-    /** Browser-like UA on top of OkHttp's TLS stack: several Cloudflare-fronted
-     *  gateways reject the default Android client by its TLS fingerprint. */
-    private const val USER_AGENT = ("Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+    /** Honest UA: a fake Chrome UA on top of OkHttp's TLS stack has the wrong
+     *  fingerprint for Chrome, so Cloudflare-fronted gateways flag it as a bot
+     *  (HTTP 403 "Just a moment..."). RikkaHub uses an honest app UA and its
+     *  /models fetch works on the same gateways. */
+    private const val USER_AGENT = "LightChat/0.4.0"
     private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 
     private val baseHttp = OkHttpClient.Builder()
         .connectTimeout(CONNECT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(READ_MS, TimeUnit.MILLISECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
         .build()
 
     private fun http(readMs: Long): OkHttpClient =
@@ -87,12 +91,36 @@ object ChatClient {
         } catch (e: Exception) { body.take(200) }
     }
 
+    /** True when a body is a Cloudflare bot-challenge page, not a provider error. */
+    private fun isCloudflareChallenge(body: String): Boolean {
+        val b = body.lowercase()
+        return b.contains("just a moment") || b.contains("cf-chl") || b.contains("cloudflare")
+    }
+
     private fun req(p: Provider, path: String, accept: String, bytes: ByteArray?): Request {
         val b = Request.Builder()
             .url(baseUrl(p) + path)
             .header("Authorization", "Bearer " + key(p))
             .header("Accept", accept)
             .header("User-Agent", USER_AGENT)
+        // Per-provider custom headers (e.g. HTTP-Referer / X-Title for OpenRouter).
+        // They must never override Authorization or the LightChat User-Agent.
+        // Only header names are logged, never values (they may hold secrets).
+        val names = ArrayList<String>()
+        for ((name, value) in p.customHeaders) {
+            val n = name.trim()
+            if (n.isEmpty()) continue
+            val lower = n.lowercase()
+            if (lower == "authorization" || lower == "user-agent") continue
+            if (value.contains('\n') || value.contains('\r')) continue
+            try {
+                b.header(n, value)
+                names.add(n)
+            } catch (e: Exception) {
+                // Invalid header name/value — skip it, never fail the request.
+            }
+        }
+        if (names.isNotEmpty()) Store.log("custom headers (" + p.name + "): " + names.joinToString(", "))
         if (bytes != null) b.post(bytes.toRequestBody(JSON_TYPE)) else b.get()
         return b.build()
     }
@@ -274,7 +302,13 @@ object ChatClient {
         val r = http(30000).newCall(req(p, "/models", "application/json", null)).execute()
         r.use { resp ->
             val code = resp.code
-            if (code != 200) throw RuntimeException("HTTP " + code + " — " + providerMsg(bodyText(resp, MAX_MODELS_BODY)))
+            if (code != 200) {
+                val body = bodyText(resp, MAX_MODELS_BODY)
+                if (code == 403 && isCloudflareChallenge(body)) {
+                    throw RuntimeException("Cloudflare blocked (HTTP 403) — add the model id manually")
+                }
+                throw RuntimeException("HTTP " + code + " — " + providerMsg(body))
+            }
             val j = JSONObject(bodyText(resp, MAX_MODELS_BODY))
             val data = j.optJSONArray("data") ?: throw RuntimeException("no data[] in response")
             val out = ArrayList<String>()

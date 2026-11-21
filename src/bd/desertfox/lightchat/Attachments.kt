@@ -60,6 +60,7 @@ object Attachments {
             "html", "htm" -> "text/html"
             "xml" -> "text/xml"
             "pdf" -> "application/pdf"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             "zip" -> "application/zip"
             else -> ""
         }
@@ -118,7 +119,15 @@ object Attachments {
             }
             val f = File(dir(ctx), id + extOf(name))
             f.writeBytes(bytes)
-            val kind = if (isTextLike(mime, name)) "text" else "binary"
+            // PDF/DOCX carry extractable text (see DocText); other non-text
+            // files stay "binary" and are never sent as raw bytes.
+            val ext = name.substringAfterLast('.', "").lowercase()
+            val kind = when {
+                isTextLike(mime, name) -> "text"
+                ext == "pdf" -> "pdf"
+                ext == "docx" -> "docx"
+                else -> "binary"
+            }
             val m = if (mime.isNotBlank()) mime else "application/octet-stream"
             Store.log("attach ok: " + name + " " + sizeLabel(f.length()) + " [" + kind + "]")
             return Att(id, name, m, f.name, f.length(), kind)
@@ -209,6 +218,27 @@ object Attachments {
         } catch (e: Exception) { "" }
     }
 
+    /** Append a PDF/DOCX attachment's extracted text, or a failure note. */
+    private fun appendExtracted(sb: StringBuilder, a: Att) {
+        val f = File(homeDir(), a.path)
+        val bytes = try {
+            if (f.exists()) f.readBytes() else null
+        } catch (e: Exception) {
+            null
+        }
+        val txt = if (bytes != null) DocText.extract(a.name, bytes) else null
+        if (sb.isNotEmpty()) sb.append("\n\n")
+        if (txt.isNullOrBlank()) {
+            sb.append("[Attached file: ").append(a.name).append(", ")
+                .append(sizeLabel(a.size)).append(" — text could not be extracted]")
+            Store.log("attach extract failed: " + a.name)
+        } else {
+            sb.append("[Attached file: ").append(a.name).append("]\n").append(txt)
+            if (txt.length >= TEXT_CAP)
+                sb.append("\n[... file truncated at ").append(TEXT_CAP / 1000).append(" KB]")
+        }
+    }
+
     /** OpenAI-compatible content for a user message that carries attachments. */
     fun buildContent(m: Msg): JSONArray {
         val sb = StringBuilder()
@@ -223,10 +253,17 @@ object Attachments {
                     sb.append("\n[... file truncated at ").append(TEXT_CAP / 1000).append(" KB]")
             }
             "binary" -> {
-                if (sb.isNotEmpty()) sb.append("\n\n")
-                sb.append("[Attached file: ").append(a.name).append(", ")
-                    .append(sizeLabel(a.size)).append(" — binary content not sent]")
+                // Attachments saved by v0.3.3 as "binary" may still be a PDF/DOCX:
+                // try extraction for those, otherwise say the content was not sent.
+                val ext = a.name.substringAfterLast('.', "").lowercase()
+                if (ext == "pdf" || ext == "docx") appendExtracted(sb, a)
+                else {
+                    if (sb.isNotEmpty()) sb.append("\n\n")
+                    sb.append("[Attached file: ").append(a.name).append(", ")
+                        .append(sizeLabel(a.size)).append(" — binary content not sent]")
+                }
             }
+            "pdf", "docx" -> appendExtracted(sb, a)
         }
         val arr = JSONArray()
         arr.put(JSONObject().put("type", "text").put("text", sb.toString()))

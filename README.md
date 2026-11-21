@@ -8,6 +8,8 @@ A lightweight, ChatGPT-style Android chat client for any OpenAI-compatible API. 
 - Per-provider allowed-models whitelist
 - Model picker with search and horizontal provider filter chips
 - Chat with file and image attachments
+- PDF and DOCX text extraction (lightweight, no library)
+- Per-provider custom headers (e.g. HTTP-Referer / X-Title for OpenRouter)
 - Markdown rendering: tables, code blocks (copy / save as file), blockquotes, nested lists
 - Images in replies render inline, tap to view / share / save
 - Message actions: copy, regenerate, edit (visible action buttons, like ChatGPT)
