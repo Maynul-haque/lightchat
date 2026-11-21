@@ -183,9 +183,9 @@ object DocText {
                         '(' -> { bytes.add('('.code); i += 2 }
                         ')' -> { bytes.add(')'.code); i += 2 }
                         '\\' -> { bytes.add('\\'.code); i += 2 }
-                        n == '\n' -> { i += 2 } // line continuation
-                        n == '\r' -> { i += if (i + 2 < s.length && s[i + 2] == '\n') 3 else 2 }
-                        n in '0'..'7' -> {
+                        '\n' -> { i += 2 } // line continuation
+                        '\r' -> { i += if (i + 2 < s.length && s[i + 2] == '\n') 3 else 2 }
+                        in '0'..'7' -> {
                             var v = 0
                             var j = i + 1
                             var count = 0
