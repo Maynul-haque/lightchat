@@ -11,7 +11,9 @@ class Provider(
     val models: MutableList<String> = ArrayList(),
     var enabled: Boolean = true,
     /** ids the user whitelisted; empty set = every model allowed */
-    val allowed: MutableSet<String> = HashSet()
+    val allowed: MutableSet<String> = HashSet(),
+    /** extra headers sent on every request for this provider, e.g. HTTP-Referer / X-Title */
+    val customHeaders: MutableMap<String, String> = LinkedHashMap()
 ) {
     fun toJson(): JSONObject {
         val o = JSONObject()
@@ -22,6 +24,7 @@ class Provider(
         o.put("enabled", enabled)
         o.put("models", JSONArray(models))
         o.put("allowed", JSONArray(allowed.toList()))
+        o.put("customHeaders", JSONObject(customHeaders))
         return o
     }
 
@@ -39,13 +42,23 @@ class Provider(
                 val s = al.optString(i)
                 if (s.isNotEmpty()) allowed.add(s)
             }
+            // Old config.json files have no "customHeaders" — they load as empty.
+            val headers = LinkedHashMap<String, String>()
+            val ch = j.optJSONObject("customHeaders")
+            if (ch != null) {
+                val keys = ch.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    headers[k] = ch.optString(k)
+                }
+            }
             return Provider(j.optString("id"), j.optString("name"), j.optString("baseUrl"),
-                j.optString("apiKey"), l, j.optBoolean("enabled", true), allowed)
+                j.optString("apiKey"), l, j.optBoolean("enabled", true), allowed, headers)
         }
     }
 }
 
-/** kind: image | text | binary; path is a file name inside the attachments folder. */
+/** kind: image | text | binary | pdf | docx; path is a file name inside the attachments folder. */
 class Att(val id: String, val name: String, val mime: String, val path: String,
           val size: Long, val kind: String) {
     fun toJson(): JSONObject = JSONObject()

@@ -143,6 +143,42 @@ class ProvidersActivity : Activity() {
         form.addView(keyRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        // Per-provider custom headers, one "Name: value" per line (blank = none).
+        // Used for gateways that need extra headers, e.g. OpenRouter's
+        // HTTP-Referer / X-Title. Authorization / User-Agent can never be set here.
+        val headersEt = EditText(this)
+        headersEt.hint = "Custom headers (optional)\nHTTP-Referer: https://example.com\nX-Title: LightChat"
+        headersEt.setHintTextColor(Ui.DIM)
+        headersEt.setText(existing?.customHeaders?.entries?.joinToString("\n") { it.key + ": " + it.value } ?: "")
+        headersEt.setTextColor(Ui.TEXT)
+        headersEt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        headersEt.background = Ui.round(Ui.INPUT_BG, 10f)
+        headersEt.setPadding(Ui.dp(this, 14), Ui.dp(this, 11), Ui.dp(this, 14), Ui.dp(this, 11))
+        headersEt.inputType = android.text.InputType.TYPE_CLASS_TEXT or
+            android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        headersEt.minLines = 3
+        headersEt.gravity = Gravity.TOP
+        val hlp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        hlp.topMargin = Ui.dp(this, 8)
+        form.addView(headersEt, hlp)
+
+        /** Parse "Name: value" lines; blank lines and lines without a colon are ignored. */
+        fun parseHeaders(text: String): LinkedHashMap<String, String> {
+            val out = LinkedHashMap<String, String>()
+            for (line in text.split("\n")) {
+                val t = line.trim()
+                if (t.isEmpty()) continue
+                val i = t.indexOf(':')
+                if (i <= 0) continue
+                val n = t.substring(0, i).trim()
+                val v = t.substring(i + 1).trim()
+                if (n.isEmpty() || v.isEmpty()) continue
+                out[n] = v
+            }
+            return out
+        }
+
         val status = Ui.tv(this, "", 13f, Ui.DIM)
         status.setPadding(0, Ui.dp(this, 10), 0, 0)
 
@@ -217,7 +253,8 @@ class ProvidersActivity : Activity() {
 
         fun tempProvider(): Provider = Provider(
             existing?.id ?: "tmp", nameEt.text.toString().trim(),
-            urlEt.text.toString().trim(), keyEt.text.toString(), ArrayList(localModels))
+            urlEt.text.toString().trim(), keyEt.text.toString(), ArrayList(localModels),
+            customHeaders = parseHeaders(headersEt.text.toString()))
 
         fetchBtn.setOnClickListener {
             val url = urlEt.text.toString().trim()
@@ -362,9 +399,11 @@ class ProvidersActivity : Activity() {
                 return@setOnClickListener
             }
             fun doSave() {
+                val headers = parseHeaders(headersEt.text.toString())
                 if (existing == null) {
                     Store.providers.add(Provider(UUID.randomUUID().toString(), name, url,
-                        keyEt.text.toString(), ArrayList(localModels), true, HashSet(allowedSel)))
+                        keyEt.text.toString(), ArrayList(localModels), true, HashSet(allowedSel),
+                        LinkedHashMap(headers)))
                 } else {
                     existing.name = name
                     existing.baseUrl = url
@@ -373,11 +412,17 @@ class ProvidersActivity : Activity() {
                     existing.models.addAll(localModels)
                     existing.allowed.clear()
                     existing.allowed.addAll(allowedSel)
+                    existing.customHeaders.clear()
+                    existing.customHeaders.putAll(headers)
                 }
                 Store.save()
                 refresh()
+                if (headers.isNotEmpty()) {
+                    status.text = headers.size.toString() + " custom header(s) saved"
+                    status.setTextColor(Ui.DIM)
+                }
                 dlg.dismiss()
-                Ui.toast(this, "Saved")
+                Ui.toast(this, if (headers.isNotEmpty()) "Saved (" + headers.size + " custom header(s))" else "Saved")
             }
             if (lastTestFailed) {
                 Dialogs.confirm(this, "Test failed",
