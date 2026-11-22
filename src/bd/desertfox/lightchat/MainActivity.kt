@@ -30,11 +30,19 @@ class MainActivity : Activity() {
     private lateinit var scrim: View
     private lateinit var sidebarPanel: LinearLayout
     private lateinit var chatsList: ListView
-    private lateinit var scrollDownBtn: TextView
+    // v0.5.1: nullable — the chatList scroll listener is registered before
+    // this view is created in buildUi(), so the listener must never assume
+    // it is initialised (UninitializedPropertyAccessException on launch).
+    private var scrollDownBtn: TextView? = null
 
     private var conv: Conversation? = null
     private var chatAdapter: ChatAdapter? = null
     private var flag: StopFlag? = null
+    // v0.6.0 (Batch B): sidebar search query; "" = show date-grouped list.
+    private var sidebarQuery = ""
+    // v0.6.0: collapsed folder ids (in-memory); folder for the next new chat.
+    private val collapsedFolders = HashSet<String>()
+    private var pendingFolderId = ""
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private var lastPaint = 0L
@@ -44,13 +52,44 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Store.load(this)
+        // v0.5.1: crash handler FIRST, before anything that can throw —
+        // in v0.5.0 it was only installed at the end of Store.load(), so a
+        // crash during load left no crash.log and no trace at all.
+        TraceLog.init(this)
+        TraceLog.installCrashHandler()
+        TraceLog.log("app", "start v" + BuildInfo.VERSION_NAME)
+        try {
+            TraceLog.log("app", "Store.load start")
+            Store.load(this)
+            TraceLog.log("app", "Store.load done providers=" + Store.providers.size +
+                " chats=" + Store.chats.size)
+        } catch (e: Exception) {
+            // A half-loaded Store is better than no app: continue with
+            // whatever was loaded; the trace says what failed.
+            TraceLog.log("app", "Store.load FAILED: " + e.javaClass.simpleName +
+                ": " + (e.message ?: ""))
+        }
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
         Store.log("app start v" + ver)
-        buildUi()
-        conv = Store.chats.firstOrNull()
-        renderChat()
-        refreshSidebar()
+        try {
+            TraceLog.log("app", "buildUi start")
+            buildUi()
+            TraceLog.log("app", "buildUi done")
+        } catch (e: Exception) {
+            TraceLog.log("app", "buildUi FAILED: " + e.javaClass.simpleName +
+                ": " + (e.message ?: ""))
+            throw e
+        }
+        try {
+            conv = Store.chats.firstOrNull()
+            renderChat()
+            refreshSidebar()
+            TraceLog.log("app", "first render done chats=" + Store.chats.size)
+        } catch (e: Exception) {
+            TraceLog.log("app", "first render FAILED: " + e.javaClass.simpleName +
+                ": " + (e.message ?: ""))
+            throw e
+        }
     }
 
     private fun buildUi() {
@@ -91,7 +130,7 @@ class MainActivity : Activity() {
         chatList = ListView(this)
         chatList.divider = null
         chatList.dividerHeight = 0
-        chatList.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6))
+        chatList.setPadding(Ui.dp(this, 16), Ui.dp(this, 6), Ui.dp(this, 16), Ui.dp(this, 6))
         chatList.clipToPadding = false
         chatList.setBackgroundColor(Ui.BG)
         chatList.visibility = View.GONE
@@ -100,9 +139,12 @@ class MainActivity : Activity() {
         chatList.setOnScrollListener(object : AbsListView.OnScrollListener {
             override fun onScrollStateChanged(v: AbsListView?, s: Int) {}
             override fun onScroll(v: AbsListView?, first: Int, visible: Int, total: Int) {
-                if (!isStreaming()) { scrollDownBtn.visibility = View.GONE; return }
+                // v0.5.1: scrollDownBtn is created later in buildUi() — the
+                // listener must tolerate it not existing yet.
+                val btn = scrollDownBtn ?: return
+                if (!isStreaming()) { btn.visibility = View.GONE; return }
                 val atBottom = first + visible >= total
-                scrollDownBtn.visibility = if (atBottom) View.GONE else View.VISIBLE
+                btn.visibility = if (atBottom) View.GONE else View.VISIBLE
             }
         })
         val listLp = LinearLayout.LayoutParams(
@@ -137,8 +179,10 @@ class MainActivity : Activity() {
             chip.isAllCaps = false
             chip.setPadding(Ui.dp(this, 16), Ui.dp(this, 8), Ui.dp(this, 16), Ui.dp(this, 8))
             chip.setOnClickListener {
+                // v0.6.0: a chip fills the input — it does not send.
                 input.setText(chipLabels[i])
-                onSend()
+                input.setSelection(input.text.length)
+                input.requestFocus()
             }
             val clp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -179,6 +223,20 @@ class MainActivity : Activity() {
             android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         input.maxLines = 5
+        // v0.6.0: Enter sends (soft keyboard shows a Send key; hardware
+        // Enter sends too, Shift+Enter still makes a newline).
+        input.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                onSend(); true
+            } else false
+        }
+        input.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
+                event.action == android.view.KeyEvent.ACTION_DOWN && !event.isShiftPressed) {
+                onSend(); true
+            } else false
+        }
         input.gravity = Gravity.CENTER_VERTICAL
         val plus = TextView(this)
         plus.text = "＋"
@@ -229,9 +287,10 @@ class MainActivity : Activity() {
         sendBtn = TextView(this)
         sendBtn.text = "➤"
         sendBtn.textSize = 18f
-        sendBtn.setTextColor(android.graphics.Color.WHITE)
+        // v0.6.0: white send button (ChatGPT-like) with a dark arrow.
+        sendBtn.setTextColor(0xFF212121.toInt())
         sendBtn.gravity = Gravity.CENTER
-        sendBtn.background = Ui.round(Ui.ACCENT, 26f)
+        sendBtn.background = Ui.round(0xFFFFFFFF.toInt(), 26f)
         sendBtn.setOnClickListener { if (isStreaming()) stopStream() else onSend() }
         val slp = LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 48))
         slp.marginStart = Ui.dp(this, 8)
@@ -239,19 +298,20 @@ class MainActivity : Activity() {
 
         // Floating scroll-to-bottom button (P1-2): shown only when the user
         // has scrolled up while a reply is streaming.
-        scrollDownBtn = TextView(this)
-        scrollDownBtn.text = "↓"
-        scrollDownBtn.textSize = 18f
-        scrollDownBtn.setTextColor(Ui.TEXT)
-        scrollDownBtn.gravity = Gravity.CENTER
-        scrollDownBtn.background = Ui.round(Ui.SURFACE, 20f)
-        scrollDownBtn.visibility = View.GONE
-        scrollDownBtn.setOnClickListener { scrollToBottom() }
+        val sdb = TextView(this)
+        sdb.text = "↓"
+        sdb.textSize = 18f
+        sdb.setTextColor(Ui.TEXT)
+        sdb.gravity = Gravity.CENTER
+        sdb.background = Ui.round(Ui.SURFACE, 20f)
+        sdb.visibility = View.GONE
+        sdb.setOnClickListener { scrollToBottom() }
+        scrollDownBtn = sdb
         val sdbLp = FrameLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40))
         sdbLp.gravity = Gravity.BOTTOM or Gravity.END
         sdbLp.marginEnd = Ui.dp(this, 16)
         sdbLp.bottomMargin = Ui.dp(this, 96)
-        root.addView(scrollDownBtn, sdbLp)
+        root.addView(sdb, sdbLp)
 
         // Sidebar
         scrim = View(this)
@@ -285,8 +345,43 @@ class MainActivity : Activity() {
         newChat.setOnClickListener { newChat() }
         val nlp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        nlp.setMargins(Ui.dp(this, 12), Ui.dp(this, 4), Ui.dp(this, 12), Ui.dp(this, 8))
+        nlp.setMargins(Ui.dp(this, 12), Ui.dp(this, 4), Ui.dp(this, 12), Ui.dp(this, 4))
         sidebarPanel.addView(newChat, nlp)
+
+        // v0.6.0: create a folder (project) for grouping chats.
+        val newFolderBtn = Button(this)
+        newFolderBtn.text = "＋ New folder"
+        newFolderBtn.textSize = 14f
+        newFolderBtn.setTextColor(Ui.TEXT)
+        newFolderBtn.background = Ui.round(Ui.SURFACE, 10f)
+        newFolderBtn.isAllCaps = false
+        newFolderBtn.setOnClickListener { newFolder() }
+        val nflp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        nflp.setMargins(Ui.dp(this, 12), 0, Ui.dp(this, 12), Ui.dp(this, 8))
+        sidebarPanel.addView(newFolderBtn, nflp)
+
+        // v0.6.0: sidebar search — filters chats by title as you type.
+        val searchEt = EditText(this)
+        searchEt.hint = "Search chats…"
+        searchEt.setHintTextColor(Ui.DIM)
+        searchEt.setTextColor(Ui.TEXT)
+        searchEt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        searchEt.background = Ui.round(Ui.INPUT_BG, 10f)
+        searchEt.isSingleLine = true
+        searchEt.setPadding(Ui.dp(this, 14), Ui.dp(this, 9), Ui.dp(this, 14), Ui.dp(this, 9))
+        searchEt.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
+                sidebarQuery = s?.toString() ?: ""
+                refreshSidebar()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+        val searchLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        searchLp.setMargins(Ui.dp(this, 12), 0, Ui.dp(this, 12), Ui.dp(this, 8))
+        sidebarPanel.addView(searchEt, searchLp)
 
         chatsList = ListView(this)
         chatsList.divider = null
@@ -371,6 +466,7 @@ class MainActivity : Activity() {
     fun openConversation(c: Conversation) {
         if (isStreaming()) { Ui.toast(this, "Stop the current reply first"); return }
         pendingAtts.clear()
+        pendingFolderId = ""
         refreshChips()
         conv = c
         closeSidebar()
@@ -380,8 +476,14 @@ class MainActivity : Activity() {
     }
 
     fun newChat() {
+        newChatInFolder("")
+    }
+
+    /** Start a new chat; folderId files it into that folder on first send. */
+    fun newChatInFolder(folderId: String) {
         if (isStreaming()) { Ui.toast(this, "Stop the current reply first"); return }
         pendingAtts.clear()
+        pendingFolderId = folderId
         refreshChips()
         conv = null
         closeSidebar()
@@ -390,7 +492,7 @@ class MainActivity : Activity() {
     }
 
     fun chatMenu(c: Conversation) {
-        val items = arrayOf("Rename", "Delete")
+        val items = arrayOf("Rename", "Move to folder…", "Delete")
         android.app.AlertDialog.Builder(this)
             .setTitle(c.title.ifBlank { "(untitled)" })
             .setItems(items) { _, which ->
@@ -398,6 +500,8 @@ class MainActivity : Activity() {
                 Dialogs.input(this, "Rename chat", c.title) { t ->
                     if (t.isNotEmpty()) { c.title = t; Store.save(); refreshSidebar() }
                 }
+            } else if (which == 1) {
+                moveChatToFolder(c)
             } else {
                 Dialogs.confirm(this, "Delete chat", "Delete \"" + c.title.ifBlank { "(untitled)" } + "\"?", "Delete") {
                     for (mm in c.messages) Attachments.deleteAtts(mm.atts)
@@ -411,8 +515,125 @@ class MainActivity : Activity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
+    /** Move a chat into a folder (or back to unfiled). No reordering: the
+     *  chat keeps its place in the list. */
+    private fun moveChatToFolder(c: Conversation) {
+        val names = ArrayList<String>()
+        val ids = ArrayList<String>()
+        if (c.folderId.isNotEmpty()) {
+            names.add("Remove from folder")
+            ids.add("")
+        }
+        for (f in Store.folders) {
+            if (f.id == c.folderId) continue
+            names.add(f.name)
+            ids.add(f.id)
+        }
+        if (names.isEmpty()) {
+            Ui.toast(this, "No folders yet — create one first")
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Move \"" + c.title.ifBlank { "(untitled)" } + "\" to…")
+            .setItems(names.toTypedArray()) { _, w ->
+                c.folderId = ids[w]
+                Store.save()
+                refreshSidebar()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    fun toggleFolder(folderId: String) {
+        if (!collapsedFolders.add(folderId)) collapsedFolders.remove(folderId)
+        refreshSidebar()
+    }
+
+    fun newFolder() {
+        Dialogs.input(this, "New folder", "") { t ->
+            if (t.isEmpty()) return@input
+            Store.folders.add(Folder(java.util.UUID.randomUUID().toString(), t))
+            Store.save()
+            refreshSidebar()
+        }
+    }
+
+    fun folderMenu(f: Folder) {
+        val items = arrayOf("New chat here", "Rename folder", "Delete folder")
+        android.app.AlertDialog.Builder(this)
+            .setTitle(f.name)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> newChatInFolder(f.id)
+                    1 -> Dialogs.input(this, "Rename folder", f.name) { t ->
+                        if (t.isNotEmpty()) { f.name = t; Store.save(); refreshSidebar() }
+                    }
+                    2 -> Dialogs.confirm(this, "Delete folder",
+                        "Delete \"" + f.name + "\"? Its chats are kept — they move back to the unfiled list.",
+                        "Delete") {
+                        for (c in Store.chats) if (c.folderId == f.id) c.folderId = ""
+                        Store.folders.remove(f)
+                        collapsedFolders.remove(f.id)
+                        Store.save()
+                        refreshSidebar()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun refreshSidebar() {
-        (chatsList.adapter as? ChatsAdapter)?.notifyDataSetChanged()
+        val adapter = chatsList.adapter as? ChatsAdapter ?: return
+        adapter.rows = computeSidebarRows()
+        adapter.notifyDataSetChanged()
+    }
+
+    /** Sidebar rows for the current search query: a flat filtered list
+     *  while searching; otherwise folder sections on top, then unfiled
+     *  chats grouped under date headers. Store.chats is newest-first, so
+     *  groups come out in order. */
+    private fun computeSidebarRows(): List<SidebarRow> {
+        val q = sidebarQuery.trim().lowercase()
+        val rows = ArrayList<SidebarRow>()
+        if (q.isNotEmpty()) {
+            val hits = Store.chats.filter { it.title.lowercase().contains(q) }
+            rows.add(SidebarRow.Header("Search results (" + hits.size + ")"))
+            for (c in hits) rows.add(SidebarRow.Chat(c))
+            return rows
+        }
+        for (f in Store.folders) {
+            val inFolder = Store.chats.filter { it.folderId == f.id }
+            val expanded = !collapsedFolders.contains(f.id)
+            rows.add(SidebarRow.FolderHead(f, expanded, inFolder.size))
+            if (expanded) for (c in inFolder) rows.add(SidebarRow.Chat(c))
+        }
+        var lastLabel: String? = null
+        for (c in Store.chats) {
+            if (c.folderId.isNotEmpty()) continue
+            val label = dateGroupLabel(c.updatedAt)
+            if (label != lastLabel) {
+                rows.add(SidebarRow.Header(label))
+                lastLabel = label
+            }
+            rows.add(SidebarRow.Chat(c))
+        }
+        return rows
+    }
+
+    private fun dateGroupLabel(ts: Long): String {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        val dayMs = 24L * 60 * 60 * 1000
+        val todayStart = cal.timeInMillis
+        return when {
+            ts >= todayStart -> "Today"
+            ts >= todayStart - dayMs -> "Yesterday"
+            ts >= todayStart - 7 * dayMs -> "Previous 7 days"
+            ts >= todayStart - 30 * dayMs -> "Previous 30 days"
+            else -> "Older"
+        }
     }
 
     // ---- sidebar ----
@@ -555,18 +776,26 @@ class MainActivity : Activity() {
     }
 
     fun viewFileImageDialog(name: String, absPath: String) {
-        val iv = android.widget.ImageView(this)
-        iv.setImageBitmap(decodeSample(absPath, 1600))
-        iv.adjustViewBounds = true
-        val mime = Attachments.mimeFromName(name).ifEmpty { "image/png" }
-        val b = android.app.AlertDialog.Builder(this)
-        b.setTitle(name).setView(iv)
-        b.setPositiveButton("Close", null)
-        b.setNeutralButton("Share") { _, _ -> shareFile(name, mime, absPath) }
-        if (android.os.Build.VERSION.SDK_INT >= 29) {
-            b.setNegativeButton("Save") { _, _ -> saveImageFileToGallery(name, absPath) }
-        }
-        b.show()
+        // v0.6.0: decode off the UI thread (was a blocking decode in the
+        // dialog call). The dialog opens once the bitmap is ready.
+        Thread {
+            val bmp = decodeSample(absPath, 1600)
+            runOnUiThread {
+                if (bmp == null) { Ui.toast(this, "Could not decode image"); return@runOnUiThread }
+                val iv = android.widget.ImageView(this)
+                iv.setImageBitmap(bmp)
+                iv.adjustViewBounds = true
+                val mime = Attachments.mimeFromName(name).ifEmpty { "image/png" }
+                val b = android.app.AlertDialog.Builder(this)
+                b.setTitle(name).setView(iv)
+                b.setPositiveButton("Close", null)
+                b.setNeutralButton("Share") { _, _ -> shareFile(name, mime, absPath) }
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    b.setNegativeButton("Save") { _, _ -> saveImageFileToGallery(name, absPath) }
+                }
+                b.show()
+            }
+        }.start()
     }
 
     fun viewBitmapDialog(name: String, bmp: android.graphics.Bitmap) {
@@ -628,7 +857,6 @@ class MainActivity : Activity() {
             if (f == null) { Ui.toast(this, "Download failed (see Logs)"); return@download }
             val rel = f.absolutePath.removePrefix(filesDir.absolutePath + "/")
             val uri = android.net.Uri.parse("content://bd.desertfox.lightchat.files/" + rel)
-            grantUriPermission(packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
             val i = android.content.Intent(android.content.Intent.ACTION_VIEW)
             i.setDataAndType(uri, Attachments.mimeFromName(f.name).ifEmpty { "application/octet-stream" })
             i.clipData = android.content.ClipData.newRawUri(f.name, uri)
@@ -639,6 +867,8 @@ class MainActivity : Activity() {
     }
 
     fun saveCodeAsFile(code: String, lang: String) {
+        // v0.6.0: the extension comes from the model's lang string — sanitise
+        // it to [a-z0-9] (max 6) so "../" can never escape the downloads dir.
         val ext = when (lang.trim().lowercase()) {
             "kotlin", "kt" -> "kt"; "java" -> "java"; "python", "py" -> "py"
             "javascript", "js" -> "js"; "typescript", "ts" -> "ts"; "json" -> "json"
@@ -646,7 +876,8 @@ class MainActivity : Activity() {
             "bash", "sh", "shell" -> "sh"; "c" -> "c"; "cpp", "c++" -> "cpp"
             "sql" -> "sql"; "markdown", "md" -> "md"; "yaml", "yml" -> "yml"
             "" -> "txt"
-            else -> lang.trim().lowercase().take(6)
+            else -> lang.trim().lowercase()
+                .filter { it in 'a'..'z' || it in '0'..'9' }.take(6).ifEmpty { "txt" }
         }
         try {
             val f = java.io.File(OutputKit.downloadsDir(this),
@@ -724,7 +955,6 @@ class MainActivity : Activity() {
     private fun shareFile(name: String, mime: String, absPath: String) {
         val rel = absPath.removePrefix(filesDir.absolutePath + "/")
         val uri = android.net.Uri.parse("content://bd.desertfox.lightchat.files/" + rel)
-        grantUriPermission(packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         val i = android.content.Intent(android.content.Intent.ACTION_SEND)
         i.type = mime
         i.putExtra(android.content.Intent.EXTRA_STREAM, uri)
@@ -741,7 +971,10 @@ class MainActivity : Activity() {
         if ((t.isEmpty() && pendingAtts.isEmpty()) || isStreaming()) return
         input.setText("")
         hideKeyboard()
-        if (conv == null) conv = Store.newConversation()
+        if (conv == null) {
+            conv = Store.newConversation(pendingFolderId)
+            pendingFolderId = ""
+        }
         val c = conv!!
         if (c.title.isBlank()) {
             c.title = t.take(40).ifBlank { pendingAtts.firstOrNull()?.name?.take(40) ?: "Chat" }
@@ -796,7 +1029,13 @@ class MainActivity : Activity() {
 
     private fun setStreamingUI(streaming: Boolean) {
         sendBtn.text = if (streaming) "■" else "➤"
-        sendBtn.background = Ui.round(if (streaming) Ui.ERROR else Ui.ACCENT, 26f)
+        if (streaming) {
+            sendBtn.background = Ui.round(Ui.ERROR, 26f)
+            sendBtn.setTextColor(android.graphics.Color.WHITE)
+        } else {
+            sendBtn.background = Ui.round(0xFFFFFFFF.toInt(), 26f)
+            sendBtn.setTextColor(0xFF212121.toInt())
+        }
         chatAdapter?.notifyDataSetChanged()
     }
 
@@ -857,7 +1096,7 @@ class MainActivity : Activity() {
     }
 
     private fun scrollToBottom() {
-        scrollDownBtn.visibility = View.GONE
+        scrollDownBtn?.visibility = View.GONE
         chatList.post { chatList.setSelection((chatAdapter?.count ?: 1) - 1) }
     }
 
@@ -894,19 +1133,27 @@ class MainActivity : Activity() {
         }
         if (isStreaming()) {
             if (atBottom) scrollToBottom()
-            else scrollDownBtn.visibility = View.VISIBLE
+            else scrollDownBtn?.visibility = View.VISIBLE
         } else {
-            scrollDownBtn.visibility = View.GONE
+            scrollDownBtn?.visibility = View.GONE
         }
     }
 
     // ---- model picker ----
 
     private fun openModelPicker() {
-        Dialogs.modelPicker(this) { p, model -> applyModel(p, model) }
+        // v0.6.0: switching model mid-stream is blocked, like opening
+        // another chat mid-stream.
+        if (isStreaming()) { Ui.toast(this, "Stop the current reply first"); return }
+        val c = conv
+        val current = if (c != null && c.modelId.isNotBlank()) c.modelId
+        else Store.settings.defaultModel
+        Dialogs.modelPicker(this, current) { p, model -> applyModel(p, model) }
     }
 
     private fun applyModel(p: Provider, model: String) {
+        // v0.6.0: remember the last-used model — the picker shows it first.
+        Store.settings.lastUsedModel = model
         val c = conv
         if (c == null) {
             Store.settings.defaultProviderId = p.id
@@ -933,6 +1180,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        TraceLog.log("app", "onResume")
         refreshSidebar()
         chatAdapter?.notifyDataSetChanged()
         updateToolbar()

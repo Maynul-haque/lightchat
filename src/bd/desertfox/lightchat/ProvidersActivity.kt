@@ -21,9 +21,23 @@ import java.util.UUID
 class ProvidersActivity : Activity() {
 
     private lateinit var list: ListView
+    private var hintView: TextView? = null
+
+    /** A base URL is valid only if it parses as http(s) with a host. */
+    private fun isValidBaseUrl(u: String): Boolean {
+        return try {
+            val url = java.net.URL(u)
+            (url.protocol == "http" || url.protocol == "https") && url.host.isNotEmpty()
+        } catch (e: Exception) { false }
+    }
+
+    private fun normUrl(u: String): String =
+        u.trim().lowercase().trimEnd('/')
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TraceLog.init(this)
+        TraceLog.log("activity", "ProvidersActivity onCreate")
         Store.load(this)
         buildUi()
     }
@@ -63,17 +77,20 @@ class ProvidersActivity : Activity() {
         root.addView(list, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        if (Store.providers.isEmpty()) {
-            val hint = Ui.tv(this, "No providers yet. Tap ＋ Add.\n\nAn OpenAI-compatible base URL works, e.g. https://api.openai.com/v1", 13f, Ui.DIM)
-            hint.gravity = Gravity.CENTER
-            hint.setPadding(Ui.dp(this, 24), Ui.dp(this, 40), Ui.dp(this, 24), 0)
-            root.addView(hint, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
+        // v0.6.0: the hint is a real view now, hidden once the first
+        // provider exists (it used to stay forever after being added once).
+        val hint = Ui.tv(this, "No providers yet. Tap ＋ Add.\n\nAn OpenAI-compatible base URL works, e.g. https://api.openai.com/v1", 13f, Ui.DIM)
+        hint.gravity = Gravity.CENTER
+        hint.setPadding(Ui.dp(this, 24), Ui.dp(this, 40), Ui.dp(this, 24), 0)
+        hintView = hint
+        root.addView(hint, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        refresh()
     }
 
     fun refresh() {
         (list.adapter as? ProvidersAdapter)?.notifyDataSetChanged()
+        hintView?.visibility = if (Store.providers.isEmpty()) View.VISIBLE else View.GONE
     }
 
     fun deleteProvider(p: Provider) {
@@ -90,7 +107,9 @@ class ProvidersActivity : Activity() {
         if (existing != null) localModels.addAll(existing.models)
         val allowedSel = HashSet<String>()
         if (existing != null) allowedSel.addAll(existing.allowed)
-        var fetchedOrTested = existing != null && existing.models.isNotEmpty()
+        // v0.6.0: editing an existing provider no longer skips the
+        // not-tested warning — fetchedOrTested starts false for everyone.
+        var fetchedOrTested = false
         var lastTestFailed = false
 
         val scroll = ScrollView(this)
@@ -271,7 +290,7 @@ class ProvidersActivity : Activity() {
 
         fetchBtn.setOnClickListener {
             val url = urlEt.text.toString().trim()
-            if (url.isEmpty()) { status.text = "Enter a base URL first"; status.setTextColor(Ui.ERROR); return@setOnClickListener }
+            if (!isValidBaseUrl(url)) { status.text = "Enter a valid base URL (http:// or https://…)"; status.setTextColor(Ui.ERROR); return@setOnClickListener }
             status.text = "Fetching…"; status.setTextColor(Ui.DIM)
             val probe = tempProvider()
             Thread {
@@ -282,6 +301,9 @@ class ProvidersActivity : Activity() {
                         localModels.addAll(models)
                         refreshModelsTv()
                         fetchedOrTested = true
+                        // v0.6.0: a later successful fetch clears the stale
+                        // failure — no more spurious "Save anyway?" prompt.
+                        lastTestFailed = false
                         Store.log("fetch models ok: " + models.size + " (" + probe.name + ")")
                         status.text = models.size.toString() + " models found"
                         status.setTextColor(0xFF7ED4A6.toInt())
@@ -411,6 +433,19 @@ class ProvidersActivity : Activity() {
                 status.setTextColor(Ui.ERROR)
                 return@setOnClickListener
             }
+            if (!isValidBaseUrl(url)) {
+                status.text = "Enter a valid base URL (http:// or https://…)"
+                status.setTextColor(Ui.ERROR)
+                return@setOnClickListener
+            }
+            // v0.6.0: duplicate base URLs are rejected (same provider added
+            // twice used to be silently allowed).
+            val dupe = Store.providers.any { it !== existing && normUrl(it.baseUrl) == normUrl(url) }
+            if (dupe) {
+                status.text = "A provider with this base URL already exists"
+                status.setTextColor(Ui.ERROR)
+                return@setOnClickListener
+            }
             fun doSave() {
                 val headers = parseHeaders(headersEt.text.toString())
                 if (existing == null) {
@@ -452,6 +487,7 @@ class ProvidersActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        TraceLog.log("activity", "ProvidersActivity onResume")
         refresh()
     }
 }

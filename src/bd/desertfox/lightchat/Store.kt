@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 object Store {
     val providers = ArrayList<Provider>()
     val chats = ArrayList<Conversation>() // newest first
+    val folders = ArrayList<Folder>()
     var settings = Settings("You are a helpful assistant.", "", "")
     val logLines = ArrayList<String>()
 
@@ -34,6 +35,8 @@ object Store {
         if (loaded) return
         loaded = true
         appCtx = ctx.applicationContext
+        TraceLog.init(ctx)
+        TraceLog.log("store", "load start")
         Attachments.init(ctx)
         val cf = File(ctx.filesDir, "config.json")
         if (cf.exists()) {
@@ -46,6 +49,12 @@ object Store {
                 if (pa != null) for (i in 0 until pa.length()) {
                     try { providers.add(Provider.from(pa.getJSONObject(i))) }
                     catch (e: Exception) { Store.log("skip corrupt provider entry " + i) }
+                }
+                // v0.6.0: folders (one bad entry must not kill the list).
+                val fa = j.optJSONArray("folders")
+                if (fa != null) for (i in 0 until fa.length()) {
+                    try { folders.add(Folder.from(fa.getJSONObject(i))) }
+                    catch (e: Exception) { Store.log("skip corrupt folder entry " + i) }
                 }
                 backupFile(cf)
             } catch (e: Exception) {
@@ -84,6 +93,15 @@ object Store {
             val seenChats = HashSet<String>()
             val itc = chats.iterator()
             while (itc.hasNext()) if (!seenChats.add(itc.next().id)) itc.remove()
+            val seenFolders = HashSet<String>()
+            val itf = folders.iterator()
+            while (itf.hasNext()) {
+                val f = itf.next()
+                if (f.id.isEmpty() || !seenFolders.add(f.id)) itf.remove()
+            }
+            // Chats pointing at a folder that no longer exists become unfiled.
+            val folderIds = folders.map { it.id }.toSet()
+            for (c in chats) if (c.folderId.isNotEmpty() && c.folderId !in folderIds) c.folderId = ""
         }
         val la = cfgLogArray()
         synchronized(logLines) {
@@ -98,6 +116,7 @@ object Store {
                 providers.add(p)
             }
         }
+        TraceLog.log("store", "load done providers=" + providers.size + " chats=" + chats.size)
         save()
     }
 
@@ -121,36 +140,50 @@ object Store {
     /** Atomic tmp-file + rename write of both files. Call from onPause. */
     fun saveNow() {
         val ctx: Context
-        val cfgText: String?
-        val chatsText: String?
+        var cfgText: String? = null
+        var chatsText: String? = null
         // P0-3: snapshot everything under the lock first. UI-thread mutations
         // never take this lock, so serialising the live lists could throw
         // ConcurrentModificationException on the save thread. The snapshot
         // (lists + messages + attachments) is fully detached from live data.
+        // v0.5.1: the snapshot/serialise is wrapped so a failure here can
+        // never kill the app — an uncaught exception on the save thread
+        // reaches the default handler and the process is killed, which
+        // looks exactly like a launch crash ~2 s after opening the app.
         synchronized(lock) {
             saveScheduled = false
             lastSaveMs = System.currentTimeMillis()
             ctx = appCtx ?: return
-            val provSnap = ArrayList(providers)
-            val chatSnap = chats.map { c ->
-                Conversation(c.id, c.title, c.providerId, c.modelId, c.createdAt, c.updatedAt,
-                    c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList())
+            try {
+                val provSnap = ArrayList(providers)
+                val folderSnap = ArrayList(folders)
+                val chatSnap = chats.map { c ->
+                    Conversation(c.id, c.title, c.providerId, c.modelId, c.createdAt, c.updatedAt,
+                        c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList(),
+                        c.folderId)
+                }
+                cfgText = if (configLoadFailed) null else {
+                    val cj = JSONObject()
+                    cj.put("providers", JSONArray(provSnap.map { it.toJson() }))
+                    cj.put("folders", JSONArray(folderSnap.map { it.toJson() }))
+                    cj.put("settings", settings.toJson())
+                    cj.put("seeded", seeded)
+                    synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
+                    cj.toString()
+                }
+                chatsText = if (chatsLoadFailed) null else
+                    JSONArray(chatSnap.map { it.toJson() }).toString()
+            } catch (e: Exception) {
+                TraceLog.log("save", "saveNow FAILED: " + e.javaClass.simpleName +
+                    ": " + (e.message ?: ""))
+                return
             }
-            cfgText = if (configLoadFailed) null else {
-                val cj = JSONObject()
-                cj.put("providers", JSONArray(provSnap.map { it.toJson() }))
-                cj.put("settings", settings.toJson())
-                cj.put("seeded", seeded)
-                synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
-                cj.toString()
-            }
-            chatsText = if (chatsLoadFailed) null else
-                JSONArray(chatSnap.map { it.toJson() }).toString()
         }
         try {
             // P0-2: never overwrite a file whose load failed.
             if (cfgText != null) atomicWrite(File(ctx.filesDir, "config.json"), cfgText)
             if (chatsText != null) atomicWrite(File(ctx.filesDir, "chats.json"), chatsText)
+            TraceLog.log("save", "saveNow done")
         } catch (e: Exception) { }
     }
 
@@ -210,12 +243,12 @@ object Store {
         try { File(ctx.filesDir, "crash.log").delete() } catch (e: Exception) {}
     }
 
-    private fun installCrashHandler() {
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            logNow(android.util.Log.getStackTraceString(e))
-            prev?.uncaughtException(t, e)
-        }
+    /** v0.5.1: delegates to TraceLog — idempotent, and installed FIRST in
+     *  MainActivity.onCreate, before Store.load, so a crash during load is
+     *  recorded in debug.log + crash.log. Kept here so every Activity that
+     *  calls Store.load() still gets the handler. */
+    fun installCrashHandler() {
+        TraceLog.installCrashHandler()
     }
 
     fun provider(id: String): Provider? {
@@ -231,10 +264,11 @@ object Store {
     /** Resolved provider for a conversation: its own, else the app default. */
     fun effectiveProvider(c: Conversation): Provider? = provider(c.providerId) ?: defaultProvider()
 
-    fun newConversation(): Conversation {
+    fun newConversation(folderId: String = ""): Conversation {
         val dp = defaultProvider()
         val c = Conversation(UUID.randomUUID().toString(), "", dp?.id ?: "", settings.defaultModel,
             System.currentTimeMillis(), System.currentTimeMillis())
+        c.folderId = folderId
         chats.add(0, c)
         save()
         return c

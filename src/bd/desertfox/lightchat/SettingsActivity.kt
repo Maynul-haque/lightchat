@@ -19,6 +19,8 @@ class SettingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TraceLog.init(this)
+        TraceLog.log("activity", "SettingsActivity onCreate")
         Store.load(this)
         buildUi()
     }
@@ -72,7 +74,8 @@ class SettingsActivity : Activity() {
         val save = Button(this)
         save.text = "Save system prompt"
         save.textSize = 13f
-        save.setTextColor(Ui.TEXT)
+        // v0.6.0: ACCENT is now a light neutral grey, so the button text is dark.
+        save.setTextColor(0xFF171A20.toInt())
         save.background = Ui.round(Ui.ACCENT, 10f)
         save.isAllCaps = false
         save.setOnClickListener {
@@ -94,9 +97,10 @@ class SettingsActivity : Activity() {
         defaultBtn.gravity = Gravity.START or Gravity.CENTER_VERTICAL
         defaultBtn.setPadding(Ui.dp(this, 14), Ui.dp(this, 12), Ui.dp(this, 14), Ui.dp(this, 12))
         defaultBtn.setOnClickListener {
-            Dialogs.modelPicker(this) { p, m ->
+            Dialogs.modelPicker(this, Store.settings.defaultModel) { p, m ->
                 Store.settings.defaultProviderId = p.id
                 Store.settings.defaultModel = m
+                Store.settings.lastUsedModel = m
                 Store.save()
                 refreshDefault()
             }
@@ -124,6 +128,12 @@ class SettingsActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        // v0.6.0: system-prompt edits are saved on pause — leaving the
+        // screen without tapping Save no longer loses them.
+        if (::sysEt.isInitialized) {
+            val t = sysEt.text.toString()
+            if (t != Store.settings.systemPrompt) Store.settings.systemPrompt = t
+        }
         Store.saveNow()
     }
 }

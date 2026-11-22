@@ -33,8 +33,10 @@ object Dialogs {
             .show()
     }
 
-    /** Model picker grouped by provider. Model tap -> onPick. "Fetch models first" opens Providers. */
-    fun modelPicker(act: Activity, onPick: (Provider, String) -> Unit) {
+    /** Model picker grouped by provider. Model tap -> onPick. "Fetch models first" opens Providers.
+     *  v0.6.0: the current model gets a ✓, and the last-used model is
+     *  sorted first within its provider's list. */
+    fun modelPicker(act: Activity, currentModel: String = "", onPick: (Provider, String) -> Unit) {
         var dlgRef: AlertDialog? = null
         // rows: provider header (0) / model (1) / fetch-hint (2)
         class Row(val type: Int, val text: String, val provider: Provider?, val model: String?)
@@ -46,6 +48,7 @@ object Dialogs {
         fun buildRows() {
             rows.clear()
             val t = query.trim().lowercase()
+            val lastUsed = Store.settings.lastUsedModel
             val targets = if (selProv != null) listOf<Provider>(selProv!!)
             else Store.providers.filter { it.enabled }
             for (p in targets) {
@@ -55,6 +58,9 @@ object Dialogs {
                     if (t.isNotEmpty() && !m.lowercase().contains(t)) continue
                     visible.add(m)
                 }
+                // Last-used model first (within its provider), so the model
+                // the user actually chats with is always at the top.
+                if (lastUsed.isNotEmpty() && visible.remove(lastUsed)) visible.add(0, lastUsed)
                 if (selProv == null && t.isNotEmpty() && visible.isEmpty()) continue
                 rows.add(Row(0, p.name, p, null))
                 if (p.models.isEmpty()) rows.add(Row(2, "Fetch models first", p, null))
@@ -99,7 +105,11 @@ object Dialogs {
                         dlgRef?.dismiss()
                     }
                 } else {
-                    box.addView(Ui.tv(act, r.text, 15f, Ui.TEXT))
+                    val isCurrent = r.type == 1 && r.model != null && r.model == currentModel
+                    val label = if (isCurrent) "✓ " + r.text else r.text
+                    val tv = Ui.tv(act, label, 15f, Ui.TEXT)
+                    if (isCurrent) tv.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    box.addView(tv)
                     box.setOnClickListener {
                         if (r.type == 1 && r.provider != null && r.model != null) {
                             onPick(r.provider, r.model)
