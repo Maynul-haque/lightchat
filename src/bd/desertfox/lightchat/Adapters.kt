@@ -434,21 +434,51 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
     }
 }
 
-/** Sidebar conversation list rows. */
+/** Sidebar rows: a date-group header, or one chat. (Phase 3 adds a
+ *  folder-header row type on top of this.) */
+sealed class SidebarRow {
+    class Header(val label: String) : SidebarRow()
+    class Chat(val conv: Conversation) : SidebarRow()
+}
+
+/** Sidebar conversation list rows, grouped by date (Today / Yesterday /
+ *  Previous 7 days / Previous 30 days / Older) or filtered by search. */
 class ChatsAdapter(private val act: MainActivity) : BaseAdapter() {
+    var rows: List<SidebarRow> = emptyList()
     private val fmt = SimpleDateFormat("MMM d", Locale.US)
 
-    override fun getCount(): Int = Store.chats.size
-    override fun getItem(position: Int): Conversation = Store.chats[position]
+    override fun getCount(): Int = rows.size
+    override fun getItem(position: Int): Any = rows[position]
     override fun getItemId(position: Int): Long = position.toLong()
-    override fun getViewTypeCount(): Int = 1
-    override fun getItemViewType(position: Int): Int = 0
+    override fun getViewTypeCount(): Int = 2
+    override fun getItemViewType(position: Int): Int = when (rows[position]) {
+        is SidebarRow.Header -> 0
+        is SidebarRow.Chat -> 1
+    }
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-        val c = Store.chats[position]
+        return when (val r = rows[position]) {
+            is SidebarRow.Header -> headerView(r.label, convertView)
+            is SidebarRow.Chat -> chatView(r.conv, convertView)
+        }
+    }
+
+    private fun headerView(label: String, convertView: View?): View {
+        val tv = convertView as? TextView ?: TextView(act).also {
+            it.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 12), Ui.dp(act, 4))
+        }
+        tv.text = label
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        tv.setTextColor(Ui.DIM)
+        tv.typeface = Typeface.DEFAULT_BOLD
+        tv.isAllCaps = true
+        return tv
+    }
+
+    private fun chatView(c: Conversation, convertView: View?): View {
         val root = convertView as? LinearLayout ?: LinearLayout(act).also {
             it.orientation = LinearLayout.VERTICAL
-            it.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 12), Ui.dp(act, 10))
+            it.setPadding(Ui.dp(act, 16), Ui.dp(act, 8), Ui.dp(act, 12), Ui.dp(act, 8))
         }
         root.removeAllViews()
         val title = Ui.tv(act, c.title.ifBlank { "(untitled)" }, 15f, Ui.TEXT)

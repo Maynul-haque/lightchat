@@ -38,6 +38,8 @@ class MainActivity : Activity() {
     private var conv: Conversation? = null
     private var chatAdapter: ChatAdapter? = null
     private var flag: StopFlag? = null
+    // v0.6.0 (Batch B): sidebar search query; "" = show date-grouped list.
+    private var sidebarQuery = ""
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private var lastPaint = 0L
@@ -343,6 +345,28 @@ class MainActivity : Activity() {
         nlp.setMargins(Ui.dp(this, 12), Ui.dp(this, 4), Ui.dp(this, 12), Ui.dp(this, 8))
         sidebarPanel.addView(newChat, nlp)
 
+        // v0.6.0: sidebar search — filters chats by title as you type.
+        val searchEt = EditText(this)
+        searchEt.hint = "Search chats…"
+        searchEt.setHintTextColor(Ui.DIM)
+        searchEt.setTextColor(Ui.TEXT)
+        searchEt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        searchEt.background = Ui.round(Ui.INPUT_BG, 10f)
+        searchEt.isSingleLine = true
+        searchEt.setPadding(Ui.dp(this, 14), Ui.dp(this, 9), Ui.dp(this, 14), Ui.dp(this, 9))
+        searchEt.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
+                sidebarQuery = s?.toString() ?: ""
+                refreshSidebar()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+        val searchLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        searchLp.setMargins(Ui.dp(this, 12), 0, Ui.dp(this, 12), Ui.dp(this, 8))
+        sidebarPanel.addView(searchEt, searchLp)
+
         chatsList = ListView(this)
         chatsList.divider = null
         chatsList.adapter = ChatsAdapter(this)
@@ -467,7 +491,50 @@ class MainActivity : Activity() {
     }
 
     private fun refreshSidebar() {
-        (chatsList.adapter as? ChatsAdapter)?.notifyDataSetChanged()
+        val adapter = chatsList.adapter as? ChatsAdapter ?: return
+        adapter.rows = computeSidebarRows()
+        adapter.notifyDataSetChanged()
+    }
+
+    /** Sidebar rows for the current search query: a flat filtered list
+     *  while searching, otherwise chats grouped under date headers.
+     *  Store.chats is newest-first, so groups come out in order. */
+    private fun computeSidebarRows(): List<SidebarRow> {
+        val q = sidebarQuery.trim().lowercase()
+        val rows = ArrayList<SidebarRow>()
+        if (q.isNotEmpty()) {
+            val hits = Store.chats.filter { it.title.lowercase().contains(q) }
+            rows.add(SidebarRow.Header("Search results (" + hits.size + ")"))
+            for (c in hits) rows.add(SidebarRow.Chat(c))
+            return rows
+        }
+        var lastLabel: String? = null
+        for (c in Store.chats) {
+            val label = dateGroupLabel(c.updatedAt)
+            if (label != lastLabel) {
+                rows.add(SidebarRow.Header(label))
+                lastLabel = label
+            }
+            rows.add(SidebarRow.Chat(c))
+        }
+        return rows
+    }
+
+    private fun dateGroupLabel(ts: Long): String {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        val dayMs = 24L * 60 * 60 * 1000
+        val todayStart = cal.timeInMillis
+        return when {
+            ts >= todayStart -> "Today"
+            ts >= todayStart - dayMs -> "Yesterday"
+            ts >= todayStart - 7 * dayMs -> "Previous 7 days"
+            ts >= todayStart - 30 * dayMs -> "Previous 30 days"
+            else -> "Older"
+        }
     }
 
     // ---- sidebar ----
