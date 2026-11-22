@@ -24,7 +24,7 @@ echo "== aapt2 link =="
 $AAPT2 link -o build/base.apk -I $ANDROID_JAR \
   --manifest AndroidManifest.xml build/res.zip \
   --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code 15 --version-name 0.6.1 \
+  --version-code 16 --version-name 0.7.0 \
   --java build/gen
 
 echo "== kotlinc =="

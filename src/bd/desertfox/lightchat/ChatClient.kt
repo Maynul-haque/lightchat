@@ -54,6 +54,10 @@ object ChatClient {
 
     private fun http(): OkHttpClient = baseHttp
 
+    /** Batch C: WebSearch uses the same shared client (one TLS session,
+     *  one connection pool) instead of building its own. */
+    fun sharedClient(): OkHttpClient = baseHttp
+
     private fun baseUrl(p: Provider): String {
         var b = p.baseUrl.trim()
         while (b.endsWith("/")) b = b.substring(0, b.length - 1)

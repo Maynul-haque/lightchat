@@ -414,6 +414,7 @@ class ProvidersActivity : Activity() {
                 .setNegativeButton("Cancel", null)
                 .create()
             ad.show()
+            Dialogs.beautify(ad)
             ad.window?.setLayout((resources.displayMetrics.widthPixels * 0.85f).toInt(),
                 (resources.displayMetrics.heightPixels * 0.72f).toInt())
         }
@@ -425,6 +426,7 @@ class ProvidersActivity : Activity() {
             .setNegativeButton("Cancel", null)
             .create()
         dlg.show()
+        Dialogs.beautify(dlg)
         dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val name = nameEt.text.toString().trim()
             val url = urlEt.text.toString().trim()

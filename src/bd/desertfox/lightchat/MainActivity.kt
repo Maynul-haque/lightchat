@@ -26,6 +26,11 @@ class MainActivity : Activity() {
     private lateinit var emptyState: LinearLayout
     private lateinit var input: EditText
     private lateinit var sendBtn: TextView
+    private lateinit var searchBtn: TextView
+    // Batch C: manual web search — on for one message only, default off.
+    // The user turns it on when they want that message searched; it resets
+    // after sending, so ordinary messages never search.
+    private var searchEnabled = false
     private lateinit var modelBtn: TextView
     private lateinit var scrim: View
     private lateinit var sidebarPanel: LinearLayout
@@ -58,6 +63,8 @@ class MainActivity : Activity() {
         TraceLog.init(this)
         TraceLog.installCrashHandler()
         TraceLog.log("app", "start v" + BuildInfo.VERSION_NAME)
+        // Batch C: keep the search toggle's state across a recreate.
+        searchEnabled = savedInstanceState?.getBoolean("searchOn") ?: false
         // v0.6.1: the system may destroy this Activity while the camera app
         // is in front; restore the pending photo file so OK in the camera
         // still attaches it (before this, camFile was a plain field and was
@@ -110,6 +117,8 @@ class MainActivity : Activity() {
         // while the camera app is open (see onCreate restore).
         camFile?.let { outState.putString("camFile", it.absolutePath) }
         camId?.let { outState.putString("camId", it) }
+        // Batch C: search toggle state survives a recreate.
+        outState.putBoolean("searchOn", searchEnabled)
     }
 
     private fun buildUi() {
@@ -266,7 +275,7 @@ class MainActivity : Activity() {
         plus.background = Ui.round(Ui.INPUT_BG, 22f)
         plus.setOnClickListener {
             val items = arrayOf("Photo from gallery", "Take photo", "Attach file")
-            android.app.AlertDialog.Builder(this).setTitle("Add attachment")
+            Dialogs.beautify(android.app.AlertDialog.Builder(this).setTitle("Add attachment")
                 .setItems(items) { _, which ->
                     when (which) {
                         0 -> {
@@ -302,11 +311,28 @@ class MainActivity : Activity() {
                             startActivityForResult(i, REQ_FILE)
                         }
                     }
-                }.setNegativeButton("Cancel", null).show()
+                }.setNegativeButton("Cancel", null).show())
         }
         val plp = LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 48))
         plp.marginEnd = Ui.dp(this, 6)
         bar2.addView(plus, plp)
+
+        // Batch C: manual web-search toggle — off by default, on for one
+        // message only. White when on (like the send button), dim when off.
+        searchBtn = TextView(this)
+        searchBtn.text = "🌐"
+        searchBtn.textSize = 18f
+        searchBtn.gravity = Gravity.CENTER
+        searchBtn.setOnClickListener {
+            searchEnabled = !searchEnabled
+            refreshSearchBtn()
+            if (searchEnabled) Ui.toast(this, "Web search on for the next message")
+        }
+        val wlp = LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 48))
+        wlp.marginEnd = Ui.dp(this, 6)
+        bar2.addView(searchBtn, wlp)
+        refreshSearchBtn()
+
         bar2.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         sendBtn = TextView(this)
@@ -518,7 +544,7 @@ class MainActivity : Activity() {
 
     fun chatMenu(c: Conversation) {
         val items = arrayOf("Rename", "Move to folder…", "Delete")
-        android.app.AlertDialog.Builder(this)
+        Dialogs.beautify(android.app.AlertDialog.Builder(this)
             .setTitle(c.title.ifBlank { "(untitled)" })
             .setItems(items) { _, which ->
             if (which == 0) {
@@ -537,7 +563,7 @@ class MainActivity : Activity() {
                     refreshSidebar()
                 }
             }
-            }.setNegativeButton("Cancel", null).show()
+            }.setNegativeButton("Cancel", null).show())
     }
 
     /** Move a chat into a folder (or back to unfiled). No reordering: the
@@ -558,14 +584,14 @@ class MainActivity : Activity() {
             Ui.toast(this, "No folders yet — create one first")
             return
         }
-        android.app.AlertDialog.Builder(this)
+        Dialogs.beautify(android.app.AlertDialog.Builder(this)
             .setTitle("Move \"" + c.title.ifBlank { "(untitled)" } + "\" to…")
             .setItems(names.toTypedArray()) { _, w ->
                 c.folderId = ids[w]
                 Store.save()
                 refreshSidebar()
             }
-            .setNegativeButton("Cancel", null).show()
+            .setNegativeButton("Cancel", null).show())
     }
 
     fun toggleFolder(folderId: String) {
@@ -584,7 +610,7 @@ class MainActivity : Activity() {
 
     fun folderMenu(f: Folder) {
         val items = arrayOf("New chat here", "Rename folder", "Delete folder")
-        android.app.AlertDialog.Builder(this)
+        Dialogs.beautify(android.app.AlertDialog.Builder(this)
             .setTitle(f.name)
             .setItems(items) { _, which ->
                 when (which) {
@@ -603,7 +629,7 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            .setNegativeButton("Cancel", null).show()
+            .setNegativeButton("Cancel", null).show())
     }
 
     private fun refreshSidebar() {
@@ -851,7 +877,7 @@ class MainActivity : Activity() {
                 if (android.os.Build.VERSION.SDK_INT >= 29) {
                     b.setNegativeButton("Save") { _, _ -> saveImageFileToGallery(name, absPath) }
                 }
-                b.show()
+                Dialogs.beautify(b.show())
             }
         }.start()
     }
@@ -980,7 +1006,7 @@ class MainActivity : Activity() {
         if (m.role == "assistant") items.add("Regenerate")
         if (m.role == "user") items.add("Edit")
         items.add("Delete")
-        android.app.AlertDialog.Builder(this)
+        Dialogs.beautify(android.app.AlertDialog.Builder(this)
             .setTitle(if (m.role == "user") "Your message" else "Reply")
             .setItems(items.toTypedArray()) { _, w ->
                 when (items[w]) {
@@ -1001,7 +1027,7 @@ class MainActivity : Activity() {
                         Store.touch(c); Store.save(); renderChat()
                     }
                 }
-            }.setNegativeButton("Cancel", null).show()
+            }.setNegativeButton("Cancel", null).show())
     }
 
 
@@ -1022,11 +1048,28 @@ class MainActivity : Activity() {
         catch (e: Exception) { Ui.toast(this, "No app to share with") }
     }
 
+    private fun refreshSearchBtn() {
+        if (searchEnabled) {
+            searchBtn.background = Ui.round(0xFFFFFFFF.toInt(), 22f)
+            searchBtn.setTextColor(0xFF212121.toInt())
+        } else {
+            searchBtn.background = Ui.round(Ui.INPUT_BG, 22f)
+            searchBtn.setTextColor(Ui.DIM)
+        }
+    }
+
     // ---- sending / streaming ----
 
     private fun onSend() {
         val t = input.text.toString().trim()
         if ((t.isEmpty() && pendingAtts.isEmpty()) || isStreaming()) return
+        // Batch C: capture the search flag for this message, then reset —
+        // the toggle is per-message, so the next message is a plain chat.
+        val doSearch = searchEnabled
+        if (doSearch) {
+            searchEnabled = false
+            refreshSearchBtn()
+        }
         input.setText("")
         hideKeyboard()
         if (conv == null) {
@@ -1048,10 +1091,10 @@ class MainActivity : Activity() {
         c.messages.add(m)
         Store.touch(c)
         renderChat()
-        startStream()
+        startStream(doSearch, if (doSearch) t else "")
     }
 
-    private fun startStream() {
+    private fun startStream(search: Boolean = false, searchQuery: String = "") {
         val c = conv ?: return
         val p = Store.effectiveProvider(c)
         val model = if (c.modelId.isNotBlank()) c.modelId else Store.settings.defaultModel
@@ -1061,6 +1104,13 @@ class MainActivity : Activity() {
             // model not in the fetched list — still allow, providers may accept any id
         }
         val placeholder = Msg("assistant", "", System.currentTimeMillis())
+        // Batch C: a note above the reply shows the search happened — notes
+        // are UI-only (never persisted or sent), so it costs nothing.
+        var searchNote: Msg? = null
+        if (search && searchQuery.isNotBlank()) {
+            searchNote = Msg("note", "🔍 Searching the web…", System.currentTimeMillis())
+            c.messages.add(searchNote)
+        }
         c.messages.add(placeholder)
         Store.touch(c)
         renderChat()
@@ -1070,10 +1120,30 @@ class MainActivity : Activity() {
         flag = f
         val history = c.messages.filter { it !== placeholder && it.role == "user" || it !== placeholder && it.role == "assistant" }
         Thread {
+            // Batch C: search FIRST (worker thread), then stream. A failed or
+            // empty search never blocks the message — the chat continues
+            // without results and the note says so.
+            var system = Store.settings.systemPrompt
+            if (search && searchQuery.isNotBlank()) {
+                val results = try { WebSearch.search(searchQuery) } catch (e: Exception) { emptyList<WebResult>() }
+                val note = searchNote
+                if (results.isNotEmpty()) {
+                    system += WebSearch.contextBlock(searchQuery, results)
+                    if (note != null) uiHandler.post {
+                        note.content = "🔍 Searched the web — " + results.size + " results"
+                        chatAdapter?.notifyDataSetChanged()
+                    }
+                } else if (note != null) {
+                    uiHandler.post {
+                        note.content = "🔍 Web search found nothing — answering without it"
+                        chatAdapter?.notifyDataSetChanged()
+                    }
+                }
+            }
             // P0-1: the delta piece used to be ignored (onDelta = { scheduleUi() }),
             // so the placeholder stayed blank until the whole reply arrived.
             // Append each piece on the UI thread, then repaint only the last row.
-            ChatClient.streamChat(p, model, Store.settings.systemPrompt, history, f,
+            ChatClient.streamChat(p, model, system, history, f,
                 onDelta = { piece ->
                     uiHandler.post {
                         placeholder.content += piece
