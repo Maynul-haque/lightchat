@@ -25,6 +25,20 @@ class FilesProvider : ContentProvider() {
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val f = fileFor(uri)
+        if (mode.contains('w')) {
+            // v0.6.1: the camera app opens the pending photo for WRITE, and
+            // the file does not exist yet — it is only a File object until
+            // the camera writes it. Create it and open read/write; before
+            // this, openFile returned null for a missing file and always
+            // opened read-only, so the capture could never be saved.
+            // fileFor() already confines paths under filesDir, so the
+            // write mode is safe.
+            return try {
+                f.parentFile?.mkdirs()
+                if (!f.exists()) f.createNewFile()
+                ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_WRITE)
+            } catch (e: Exception) { null }
+        }
         if (!f.exists()) return null
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
     }
