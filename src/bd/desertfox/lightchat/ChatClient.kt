@@ -169,6 +169,8 @@ object ChatClient {
     fun streamChat(p: Provider, model: String, system: String, history: List<Msg>,
                    flag: StopFlag, onDelta: (String) -> Unit,
                    onDone: (String, Int) -> Unit, onError: (String, String) -> Unit) {
+        TraceLog.log("net", "stream start provider=" + p.name + " model=" + model +
+            " history=" + history.size)
         var sawFirstChunk = false
         var resp: Response? = null
         var firstMs = FIRST_CHUNK_MS
@@ -207,6 +209,7 @@ object ChatClient {
                     if (payload == "[DONE]") break
                     if (!sawFirstChunk) {
                         sawFirstChunk = true
+                        TraceLog.log("net", "stream first chunk")
                         try { source.timeout().timeout(READ_MS, TimeUnit.MILLISECONDS) } catch (e: Exception) {}
                         try { call.timeout().timeout(READ_MS, TimeUnit.MILLISECONDS) } catch (e: Exception) {}
                     }
@@ -234,6 +237,7 @@ object ChatClient {
                 if (failed) return
                 if (flag.stop.get()) { onDone(sb.toString(), tokens); return }
                 if (sb.isBlank()) { onError("Invalid response from provider", ""); return }
+                TraceLog.log("net", "stream done tokens=" + tokens + " chars=" + sb.length)
                 onDone(sb.toString(), tokens)
             } else {
                 // P1-8: fall back to non-streaming only on 5xx. Auth (401/403)
@@ -256,6 +260,7 @@ object ChatClient {
                 }
             }
         } catch (e: Exception) {
+            TraceLog.log("net", "stream error: " + e.javaClass.simpleName + ": " + (e.message ?: ""))
             if (flag.stop.get()) onDone(sb.toString(), -1)
             else onError(netMsg(e, sawFirstChunk, (firstMs / 1000).toInt()), sb.toString())
         } finally {
@@ -339,12 +344,14 @@ object ChatClient {
 
     /** GET /models. An empty list never wipes the stored one (throws instead). */
     fun fetchModels(p: Provider): List<String> {
+        TraceLog.log("net", "fetchModels start provider=" + p.name)
         val call = http().newCall(req(p, "/models", "application/json", null))
         call.timeout().timeout(30000, TimeUnit.MILLISECONDS)
         val r = call.execute()
         r.use { resp ->
             val code = resp.code
             if (code != 200) {
+                TraceLog.log("net", "fetchModels HTTP " + code)
                 val body = bodyText(resp, MAX_MODELS_BODY)
                 if (code == 403 && isCloudflareChallenge(body)) {
                     throw RuntimeException("Cloudflare blocked (HTTP 403) — add the model id manually")
@@ -359,6 +366,7 @@ object ChatClient {
                 if (id.isNotEmpty()) out.add(id)
             }
             if (out.isEmpty()) throw RuntimeException("no models in response — the saved list was kept")
+            TraceLog.log("net", "fetchModels ok models=" + out.size)
             return out
         }
     }

@@ -30,7 +30,10 @@ class MainActivity : Activity() {
     private lateinit var scrim: View
     private lateinit var sidebarPanel: LinearLayout
     private lateinit var chatsList: ListView
-    private lateinit var scrollDownBtn: TextView
+    // v0.5.1: nullable — the chatList scroll listener is registered before
+    // this view is created in buildUi(), so the listener must never assume
+    // it is initialised (UninitializedPropertyAccessException on launch).
+    private var scrollDownBtn: TextView? = null
 
     private var conv: Conversation? = null
     private var chatAdapter: ChatAdapter? = null
@@ -44,13 +47,44 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Store.load(this)
+        // v0.5.1: crash handler FIRST, before anything that can throw —
+        // in v0.5.0 it was only installed at the end of Store.load(), so a
+        // crash during load left no crash.log and no trace at all.
+        TraceLog.init(this)
+        TraceLog.installCrashHandler()
+        TraceLog.log("app", "start v" + BuildInfo.VERSION_NAME)
+        try {
+            TraceLog.log("app", "Store.load start")
+            Store.load(this)
+            TraceLog.log("app", "Store.load done providers=" + Store.providers.size +
+                " chats=" + Store.chats.size)
+        } catch (e: Exception) {
+            // A half-loaded Store is better than no app: continue with
+            // whatever was loaded; the trace says what failed.
+            TraceLog.log("app", "Store.load FAILED: " + e.javaClass.simpleName +
+                ": " + (e.message ?: ""))
+        }
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
         Store.log("app start v" + ver)
-        buildUi()
-        conv = Store.chats.firstOrNull()
-        renderChat()
-        refreshSidebar()
+        try {
+            TraceLog.log("app", "buildUi start")
+            buildUi()
+            TraceLog.log("app", "buildUi done")
+        } catch (e: Exception) {
+            TraceLog.log("app", "buildUi FAILED: " + e.javaClass.simpleName +
+                ": " + (e.message ?: ""))
+            throw e
+        }
+        try {
+            conv = Store.chats.firstOrNull()
+            renderChat()
+            refreshSidebar()
+            TraceLog.log("app", "first render done chats=" + Store.chats.size)
+        } catch (e: Exception) {
+            TraceLog.log("app", "first render FAILED: " + e.javaClass.simpleName +
+                ": " + (e.message ?: ""))
+            throw e
+        }
     }
 
     private fun buildUi() {
@@ -100,9 +134,12 @@ class MainActivity : Activity() {
         chatList.setOnScrollListener(object : AbsListView.OnScrollListener {
             override fun onScrollStateChanged(v: AbsListView?, s: Int) {}
             override fun onScroll(v: AbsListView?, first: Int, visible: Int, total: Int) {
-                if (!isStreaming()) { scrollDownBtn.visibility = View.GONE; return }
+                // v0.5.1: scrollDownBtn is created later in buildUi() — the
+                // listener must tolerate it not existing yet.
+                val btn = scrollDownBtn ?: return
+                if (!isStreaming()) { btn.visibility = View.GONE; return }
                 val atBottom = first + visible >= total
-                scrollDownBtn.visibility = if (atBottom) View.GONE else View.VISIBLE
+                btn.visibility = if (atBottom) View.GONE else View.VISIBLE
             }
         })
         val listLp = LinearLayout.LayoutParams(
@@ -239,19 +276,20 @@ class MainActivity : Activity() {
 
         // Floating scroll-to-bottom button (P1-2): shown only when the user
         // has scrolled up while a reply is streaming.
-        scrollDownBtn = TextView(this)
-        scrollDownBtn.text = "↓"
-        scrollDownBtn.textSize = 18f
-        scrollDownBtn.setTextColor(Ui.TEXT)
-        scrollDownBtn.gravity = Gravity.CENTER
-        scrollDownBtn.background = Ui.round(Ui.SURFACE, 20f)
-        scrollDownBtn.visibility = View.GONE
-        scrollDownBtn.setOnClickListener { scrollToBottom() }
+        val sdb = TextView(this)
+        sdb.text = "↓"
+        sdb.textSize = 18f
+        sdb.setTextColor(Ui.TEXT)
+        sdb.gravity = Gravity.CENTER
+        sdb.background = Ui.round(Ui.SURFACE, 20f)
+        sdb.visibility = View.GONE
+        sdb.setOnClickListener { scrollToBottom() }
+        scrollDownBtn = sdb
         val sdbLp = FrameLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40))
         sdbLp.gravity = Gravity.BOTTOM or Gravity.END
         sdbLp.marginEnd = Ui.dp(this, 16)
         sdbLp.bottomMargin = Ui.dp(this, 96)
-        root.addView(scrollDownBtn, sdbLp)
+        root.addView(sdb, sdbLp)
 
         // Sidebar
         scrim = View(this)
@@ -857,7 +895,7 @@ class MainActivity : Activity() {
     }
 
     private fun scrollToBottom() {
-        scrollDownBtn.visibility = View.GONE
+        scrollDownBtn?.visibility = View.GONE
         chatList.post { chatList.setSelection((chatAdapter?.count ?: 1) - 1) }
     }
 
@@ -894,9 +932,9 @@ class MainActivity : Activity() {
         }
         if (isStreaming()) {
             if (atBottom) scrollToBottom()
-            else scrollDownBtn.visibility = View.VISIBLE
+            else scrollDownBtn?.visibility = View.VISIBLE
         } else {
-            scrollDownBtn.visibility = View.GONE
+            scrollDownBtn?.visibility = View.GONE
         }
     }
 
@@ -933,6 +971,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        TraceLog.log("app", "onResume")
         refreshSidebar()
         chatAdapter?.notifyDataSetChanged()
         updateToolbar()

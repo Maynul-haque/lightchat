@@ -24,6 +24,8 @@ class ProvidersActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TraceLog.init(this)
+        TraceLog.log("activity", "ProvidersActivity onCreate")
         Store.load(this)
         buildUi()
     }
@@ -452,6 +454,7 @@ class ProvidersActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        TraceLog.log("activity", "ProvidersActivity onResume")
         refresh()
     }
 }

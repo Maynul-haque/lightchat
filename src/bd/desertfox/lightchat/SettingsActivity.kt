@@ -19,6 +19,8 @@ class SettingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TraceLog.init(this)
+        TraceLog.log("activity", "SettingsActivity onCreate")
         Store.load(this)
         buildUi()
     }

@@ -18,6 +18,8 @@ class LogsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TraceLog.init(this)
+        TraceLog.log("activity", "LogsActivity onCreate")
         Store.load(this)
         buildUi()
     }
@@ -47,6 +49,26 @@ class LogsActivity : Activity() {
         copy.setPadding(Ui.dp(this, 10), Ui.dp(this, 4), Ui.dp(this, 10), Ui.dp(this, 4))
         copy.setOnClickListener { Ui.copy(this, body.text.toString()) }
         bar.addView(copy)
+        // v0.5.1: share the whole log (including the debug trace) so it can
+        // be sent to the developer after a crash.
+        val share = Button(this)
+        share.text = "Share"
+        share.textSize = 12f
+        share.setTextColor(Ui.TEXT)
+        share.background = Ui.round(0xFF2A2E38.toInt(), 10f)
+        share.isAllCaps = false
+        share.setPadding(Ui.dp(this, 10), Ui.dp(this, 4), Ui.dp(this, 10), Ui.dp(this, 4))
+        val shp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        shp.marginStart = Ui.dp(this, 6)
+        share.setOnClickListener {
+            val i = android.content.Intent(android.content.Intent.ACTION_SEND)
+            i.type = "text/plain"
+            i.putExtra(android.content.Intent.EXTRA_TEXT, body.text.toString())
+            try { startActivity(android.content.Intent.createChooser(i, "Share logs")) }
+            catch (e: Exception) { Ui.toast(this, "No app to share with") }
+        }
+        bar.addView(share, shp)
         val clear = Button(this)
         clear.text = "Clear"
         clear.textSize = 12f
@@ -60,6 +82,7 @@ class LogsActivity : Activity() {
         clp.marginEnd = Ui.dp(this, 10)
         clear.setOnClickListener {
             Store.clearCrashLog()
+            TraceLog.clear()
             synchronized(Store.logLines) { Store.logLines.clear() }
             Store.save()
             refresh()
@@ -88,6 +111,12 @@ class LogsActivity : Activity() {
         if (crash.isNotBlank()) {
             sb.append("=== LAST CRASH ===").append('\n').append(crash).append("\n\n")
         }
+        // v0.5.1: the startup/network trace (debug.log) — this is what
+        // pinpoints a launch crash, since it is flushed on every write.
+        val trace = TraceLog.readTail()
+        if (trace.isNotBlank()) {
+            sb.append("=== TRACE (debug.log) ===").append('\n').append(trace).append("\n\n")
+        }
         synchronized(Store.logLines) {
             if (Store.logLines.isEmpty()) sb.append("(no log entries)")
             else for (l in Store.logLines) sb.append(l).append('\n')
@@ -97,6 +126,7 @@ class LogsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        TraceLog.log("activity", "LogsActivity onResume")
         refresh()
     }
 }

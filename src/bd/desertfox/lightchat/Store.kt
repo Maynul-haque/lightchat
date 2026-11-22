@@ -34,6 +34,8 @@ object Store {
         if (loaded) return
         loaded = true
         appCtx = ctx.applicationContext
+        TraceLog.init(ctx)
+        TraceLog.log("store", "load start")
         Attachments.init(ctx)
         val cf = File(ctx.filesDir, "config.json")
         if (cf.exists()) {
@@ -98,6 +100,7 @@ object Store {
                 providers.add(p)
             }
         }
+        TraceLog.log("store", "load done providers=" + providers.size + " chats=" + chats.size)
         save()
     }
 
@@ -121,36 +124,47 @@ object Store {
     /** Atomic tmp-file + rename write of both files. Call from onPause. */
     fun saveNow() {
         val ctx: Context
-        val cfgText: String?
-        val chatsText: String?
+        var cfgText: String? = null
+        var chatsText: String? = null
         // P0-3: snapshot everything under the lock first. UI-thread mutations
         // never take this lock, so serialising the live lists could throw
         // ConcurrentModificationException on the save thread. The snapshot
         // (lists + messages + attachments) is fully detached from live data.
+        // v0.5.1: the snapshot/serialise is wrapped so a failure here can
+        // never kill the app — an uncaught exception on the save thread
+        // reaches the default handler and the process is killed, which
+        // looks exactly like a launch crash ~2 s after opening the app.
         synchronized(lock) {
             saveScheduled = false
             lastSaveMs = System.currentTimeMillis()
             ctx = appCtx ?: return
-            val provSnap = ArrayList(providers)
-            val chatSnap = chats.map { c ->
-                Conversation(c.id, c.title, c.providerId, c.modelId, c.createdAt, c.updatedAt,
-                    c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList())
+            try {
+                val provSnap = ArrayList(providers)
+                val chatSnap = chats.map { c ->
+                    Conversation(c.id, c.title, c.providerId, c.modelId, c.createdAt, c.updatedAt,
+                        c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList())
+                }
+                cfgText = if (configLoadFailed) null else {
+                    val cj = JSONObject()
+                    cj.put("providers", JSONArray(provSnap.map { it.toJson() }))
+                    cj.put("settings", settings.toJson())
+                    cj.put("seeded", seeded)
+                    synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
+                    cj.toString()
+                }
+                chatsText = if (chatsLoadFailed) null else
+                    JSONArray(chatSnap.map { it.toJson() }).toString()
+            } catch (e: Exception) {
+                TraceLog.log("save", "saveNow FAILED: " + e.javaClass.simpleName +
+                    ": " + (e.message ?: ""))
+                return
             }
-            cfgText = if (configLoadFailed) null else {
-                val cj = JSONObject()
-                cj.put("providers", JSONArray(provSnap.map { it.toJson() }))
-                cj.put("settings", settings.toJson())
-                cj.put("seeded", seeded)
-                synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
-                cj.toString()
-            }
-            chatsText = if (chatsLoadFailed) null else
-                JSONArray(chatSnap.map { it.toJson() }).toString()
         }
         try {
             // P0-2: never overwrite a file whose load failed.
             if (cfgText != null) atomicWrite(File(ctx.filesDir, "config.json"), cfgText)
             if (chatsText != null) atomicWrite(File(ctx.filesDir, "chats.json"), chatsText)
+            TraceLog.log("save", "saveNow done")
         } catch (e: Exception) { }
     }
 
@@ -210,12 +224,12 @@ object Store {
         try { File(ctx.filesDir, "crash.log").delete() } catch (e: Exception) {}
     }
 
-    private fun installCrashHandler() {
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            logNow(android.util.Log.getStackTraceString(e))
-            prev?.uncaughtException(t, e)
-        }
+    /** v0.5.1: delegates to TraceLog — idempotent, and installed FIRST in
+     *  MainActivity.onCreate, before Store.load, so a crash during load is
+     *  recorded in debug.log + crash.log. Kept here so every Activity that
+     *  calls Store.load() still gets the handler. */
+    fun installCrashHandler() {
+        TraceLog.installCrashHandler()
     }
 
     fun provider(id: String): Provider? {

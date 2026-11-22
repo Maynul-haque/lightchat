@@ -7,8 +7,8 @@ import org.json.JSONObject
  *  build.sh must be kept in sync (aapt2 link --version-code/--version-name);
  *  ChatClient.USER_AGENT and the Settings About line read this constant. */
 object BuildInfo {
-    const val VERSION_NAME = "0.5.0"
-    const val VERSION_CODE = 12
+    const val VERSION_NAME = "0.5.1"
+    const val VERSION_CODE = 13
 }
 
 class Provider(

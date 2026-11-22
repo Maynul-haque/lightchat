@@ -10,6 +10,7 @@ A lightweight, ChatGPT-style Android chat client for any OpenAI-compatible API. 
 - Chat with file and image attachments
 - PDF and DOCX text extraction (lightweight, no library)
 - v0.5.0 production readiness: live streaming display, corrupt-file protection with backups, crash-safe saves, download filename sanitising, attachment size cap, sampled/cached image decoding, history trimming, no forced scroll while reading
+- v0.5.1 launch-crash hotfix: crash handler installed before Store.load, startup guarded with tracing, scroll-to-bottom button null-safe, save thread can no longer kill the app; new TraceLog (debug.log, viewable/shareable from the Logs screen) records the startup path step by step so a future crash is diagnosable
 - Fixed: user-message action buttons no longer overlap the message bubble (copy/edit stay in the long-press menu)
 - Per-provider custom headers (e.g. HTTP-Referer / X-Title for OpenRouter)
 - Markdown rendering: tables, code blocks (copy / save as file), blockquotes, nested lists
