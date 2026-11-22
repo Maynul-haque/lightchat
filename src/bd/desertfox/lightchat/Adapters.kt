@@ -88,9 +88,11 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
     }
 
     private fun userView(m: Msg, convertView: View?): View {
-        val root = convertView as? FrameLayout ?: FrameLayout(act).also {
+        val root = convertView as? LinearLayout ?: LinearLayout(act).also {
+            it.orientation = LinearLayout.VERTICAL
             it.setPadding(Ui.dp(act, 10), Ui.dp(act, 3), Ui.dp(act, 10), Ui.dp(act, 3))
         }
+        root.orientation = LinearLayout.VERTICAL
         root.removeAllViews()
         val bubble = LinearLayout(act)
         bubble.orientation = LinearLayout.VERTICAL
@@ -115,32 +117,14 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
             if (m.atts.isNotEmpty()) lp.setMargins(0, Ui.dp(act, 8), 0, Ui.dp(act, 2))
             bubble.addView(tv, lp)
         }
-        val lp = FrameLayout.LayoutParams(
+        val lp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.gravity = Gravity.END
         lp.marginStart = Ui.dp(act, 56)
         root.addView(bubble, lp)
-        if (!act.isStreaming() && m.content.isNotBlank()) {
-            val row = LinearLayout(act)
-            row.orientation = LinearLayout.HORIZONTAL
-            row.gravity = Gravity.CENTER_VERTICAL
-            val copy = actionButton("\u2B09")
-            copy.setOnClickListener { Ui.copy(act, m.content) }
-            row.addView(copy)
-            val edit = actionButton("\u270E")
-            val elp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            elp.marginStart = Ui.dp(act, 8)
-            elp.topMargin = Ui.dp(act, 4)
-            edit.setOnClickListener { act.editFrom(m) }
-            row.addView(edit, elp)
-            val rlp = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            rlp.gravity = Gravity.END
-            rlp.topMargin = Ui.dp(act, 2)
-            rlp.marginStart = Ui.dp(act, 56)
-            root.addView(row, rlp)
-        }
+        // No action row under user messages: the copy/edit buttons used to
+        // overlay the bubble (FrameLayout root). Copy/Edit stay in the
+        // long-press menu (MainActivity.messageMenu).
         bubble.setOnLongClickListener { act.messageMenu(m); true }
         bubble.isLongClickable = true
         return root
