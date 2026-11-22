@@ -40,6 +40,9 @@ class MainActivity : Activity() {
     private var flag: StopFlag? = null
     // v0.6.0 (Batch B): sidebar search query; "" = show date-grouped list.
     private var sidebarQuery = ""
+    // v0.6.0: collapsed folder ids (in-memory); folder for the next new chat.
+    private val collapsedFolders = HashSet<String>()
+    private var pendingFolderId = ""
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private var lastPaint = 0L
@@ -342,8 +345,21 @@ class MainActivity : Activity() {
         newChat.setOnClickListener { newChat() }
         val nlp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        nlp.setMargins(Ui.dp(this, 12), Ui.dp(this, 4), Ui.dp(this, 12), Ui.dp(this, 8))
+        nlp.setMargins(Ui.dp(this, 12), Ui.dp(this, 4), Ui.dp(this, 12), Ui.dp(this, 4))
         sidebarPanel.addView(newChat, nlp)
+
+        // v0.6.0: create a folder (project) for grouping chats.
+        val newFolderBtn = Button(this)
+        newFolderBtn.text = "＋ New folder"
+        newFolderBtn.textSize = 14f
+        newFolderBtn.setTextColor(Ui.TEXT)
+        newFolderBtn.background = Ui.round(Ui.SURFACE, 10f)
+        newFolderBtn.isAllCaps = false
+        newFolderBtn.setOnClickListener { newFolder() }
+        val nflp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        nflp.setMargins(Ui.dp(this, 12), 0, Ui.dp(this, 12), Ui.dp(this, 8))
+        sidebarPanel.addView(newFolderBtn, nflp)
 
         // v0.6.0: sidebar search — filters chats by title as you type.
         val searchEt = EditText(this)
@@ -450,6 +466,7 @@ class MainActivity : Activity() {
     fun openConversation(c: Conversation) {
         if (isStreaming()) { Ui.toast(this, "Stop the current reply first"); return }
         pendingAtts.clear()
+        pendingFolderId = ""
         refreshChips()
         conv = c
         closeSidebar()
@@ -459,8 +476,14 @@ class MainActivity : Activity() {
     }
 
     fun newChat() {
+        newChatInFolder("")
+    }
+
+    /** Start a new chat; folderId files it into that folder on first send. */
+    fun newChatInFolder(folderId: String) {
         if (isStreaming()) { Ui.toast(this, "Stop the current reply first"); return }
         pendingAtts.clear()
+        pendingFolderId = folderId
         refreshChips()
         conv = null
         closeSidebar()
@@ -469,7 +492,7 @@ class MainActivity : Activity() {
     }
 
     fun chatMenu(c: Conversation) {
-        val items = arrayOf("Rename", "Delete")
+        val items = arrayOf("Rename", "Move to folder…", "Delete")
         android.app.AlertDialog.Builder(this)
             .setTitle(c.title.ifBlank { "(untitled)" })
             .setItems(items) { _, which ->
@@ -477,6 +500,8 @@ class MainActivity : Activity() {
                 Dialogs.input(this, "Rename chat", c.title) { t ->
                     if (t.isNotEmpty()) { c.title = t; Store.save(); refreshSidebar() }
                 }
+            } else if (which == 1) {
+                moveChatToFolder(c)
             } else {
                 Dialogs.confirm(this, "Delete chat", "Delete \"" + c.title.ifBlank { "(untitled)" } + "\"?", "Delete") {
                     for (mm in c.messages) Attachments.deleteAtts(mm.atts)
@@ -490,6 +515,72 @@ class MainActivity : Activity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
+    /** Move a chat into a folder (or back to unfiled). No reordering: the
+     *  chat keeps its place in the list. */
+    private fun moveChatToFolder(c: Conversation) {
+        val names = ArrayList<String>()
+        val ids = ArrayList<String>()
+        if (c.folderId.isNotEmpty()) {
+            names.add("Remove from folder")
+            ids.add("")
+        }
+        for (f in Store.folders) {
+            if (f.id == c.folderId) continue
+            names.add(f.name)
+            ids.add(f.id)
+        }
+        if (names.isEmpty()) {
+            Ui.toast(this, "No folders yet — create one first")
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Move \"" + c.title.ifBlank { "(untitled)" } + "\" to…")
+            .setItems(names.toTypedArray()) { _, w ->
+                c.folderId = ids[w]
+                Store.save()
+                refreshSidebar()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    fun toggleFolder(folderId: String) {
+        if (!collapsedFolders.add(folderId)) collapsedFolders.remove(folderId)
+        refreshSidebar()
+    }
+
+    fun newFolder() {
+        Dialogs.input(this, "New folder", "") { t ->
+            if (t.isEmpty()) return@input
+            Store.folders.add(Folder(java.util.UUID.randomUUID().toString(), t))
+            Store.save()
+            refreshSidebar()
+        }
+    }
+
+    fun folderMenu(f: Folder) {
+        val items = arrayOf("New chat here", "Rename folder", "Delete folder")
+        android.app.AlertDialog.Builder(this)
+            .setTitle(f.name)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> newChatInFolder(f.id)
+                    1 -> Dialogs.input(this, "Rename folder", f.name) { t ->
+                        if (t.isNotEmpty()) { f.name = t; Store.save(); refreshSidebar() }
+                    }
+                    2 -> Dialogs.confirm(this, "Delete folder",
+                        "Delete \"" + f.name + "\"? Its chats are kept — they move back to the unfiled list.",
+                        "Delete") {
+                        for (c in Store.chats) if (c.folderId == f.id) c.folderId = ""
+                        Store.folders.remove(f)
+                        collapsedFolders.remove(f.id)
+                        Store.save()
+                        refreshSidebar()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun refreshSidebar() {
         val adapter = chatsList.adapter as? ChatsAdapter ?: return
         adapter.rows = computeSidebarRows()
@@ -497,8 +588,9 @@ class MainActivity : Activity() {
     }
 
     /** Sidebar rows for the current search query: a flat filtered list
-     *  while searching, otherwise chats grouped under date headers.
-     *  Store.chats is newest-first, so groups come out in order. */
+     *  while searching; otherwise folder sections on top, then unfiled
+     *  chats grouped under date headers. Store.chats is newest-first, so
+     *  groups come out in order. */
     private fun computeSidebarRows(): List<SidebarRow> {
         val q = sidebarQuery.trim().lowercase()
         val rows = ArrayList<SidebarRow>()
@@ -508,8 +600,15 @@ class MainActivity : Activity() {
             for (c in hits) rows.add(SidebarRow.Chat(c))
             return rows
         }
+        for (f in Store.folders) {
+            val inFolder = Store.chats.filter { it.folderId == f.id }
+            val expanded = !collapsedFolders.contains(f.id)
+            rows.add(SidebarRow.FolderHead(f, expanded, inFolder.size))
+            if (expanded) for (c in inFolder) rows.add(SidebarRow.Chat(c))
+        }
         var lastLabel: String? = null
         for (c in Store.chats) {
+            if (c.folderId.isNotEmpty()) continue
             val label = dateGroupLabel(c.updatedAt)
             if (label != lastLabel) {
                 rows.add(SidebarRow.Header(label))
@@ -872,7 +971,10 @@ class MainActivity : Activity() {
         if ((t.isEmpty() && pendingAtts.isEmpty()) || isStreaming()) return
         input.setText("")
         hideKeyboard()
-        if (conv == null) conv = Store.newConversation()
+        if (conv == null) {
+            conv = Store.newConversation(pendingFolderId)
+            pendingFolderId = ""
+        }
         val c = conv!!
         if (c.title.isBlank()) {
             c.title = t.take(40).ifBlank { pendingAtts.firstOrNull()?.name?.take(40) ?: "Chat" }

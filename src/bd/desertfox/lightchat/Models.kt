@@ -111,6 +111,16 @@ class Msg(val role: String, var content: String, val ts: Long, var tokens: Int =
     }
 }
 
+/** A folder (project) that groups chats in the sidebar. Chats keep their
+ *  folderId; deleting a folder only unfiles its chats, never deletes them. */
+class Folder(val id: String, var name: String) {
+    fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name)
+
+    companion object {
+        fun from(j: JSONObject) = Folder(j.optString("id"), j.optString("name"))
+    }
+}
+
 class Conversation(
     val id: String,
     var title: String,
@@ -118,7 +128,8 @@ class Conversation(
     var modelId: String,
     val createdAt: Long,
     var updatedAt: Long,
-    val messages: MutableList<Msg> = ArrayList()
+    val messages: MutableList<Msg> = ArrayList(),
+    var folderId: String = ""
 ) {
     fun toJson(): JSONObject {
         val o = JSONObject()
@@ -128,6 +139,7 @@ class Conversation(
         o.put("modelId", modelId)
         o.put("createdAt", createdAt)
         o.put("updatedAt", updatedAt)
+        o.put("folderId", folderId)
         val a = JSONArray()
         // P1-7: blank assistant placeholders (streaming that never produced
         // text, or a stream interrupted before any text) are never persisted.
@@ -147,8 +159,11 @@ class Conversation(
             if (a != null) for (i in 0 until a.length()) {
                 try { l.add(Msg.from(a.getJSONObject(i))) } catch (e: Exception) {}
             }
-            return Conversation(j.optString("id"), j.optString("title"), j.optString("providerId"),
+            val c = Conversation(j.optString("id"), j.optString("title"), j.optString("providerId"),
                 j.optString("modelId"), j.optLong("createdAt"), j.optLong("updatedAt"), l)
+            // Old chats.json files have no "folderId" — they load as unfiled.
+            c.folderId = j.optString("folderId", "")
+            return c
         }
     }
 }

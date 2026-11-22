@@ -434,15 +434,16 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
     }
 }
 
-/** Sidebar rows: a date-group header, or one chat. (Phase 3 adds a
- *  folder-header row type on top of this.) */
+/** Sidebar rows: a date-group header, a folder header, or one chat. */
 sealed class SidebarRow {
     class Header(val label: String) : SidebarRow()
+    class FolderHead(val folder: Folder, val expanded: Boolean, val count: Int) : SidebarRow()
     class Chat(val conv: Conversation) : SidebarRow()
 }
 
 /** Sidebar conversation list rows, grouped by date (Today / Yesterday /
- *  Previous 7 days / Previous 30 days / Older) or filtered by search. */
+ *  Previous 7 days / Previous 30 days / Older) or filtered by search,
+ *  with collapsible folder sections on top. */
 class ChatsAdapter(private val act: MainActivity) : BaseAdapter() {
     var rows: List<SidebarRow> = emptyList()
     private val fmt = SimpleDateFormat("MMM d", Locale.US)
@@ -450,15 +451,17 @@ class ChatsAdapter(private val act: MainActivity) : BaseAdapter() {
     override fun getCount(): Int = rows.size
     override fun getItem(position: Int): Any = rows[position]
     override fun getItemId(position: Int): Long = position.toLong()
-    override fun getViewTypeCount(): Int = 2
+    override fun getViewTypeCount(): Int = 3
     override fun getItemViewType(position: Int): Int = when (rows[position]) {
         is SidebarRow.Header -> 0
-        is SidebarRow.Chat -> 1
+        is SidebarRow.FolderHead -> 1
+        is SidebarRow.Chat -> 2
     }
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
         return when (val r = rows[position]) {
             is SidebarRow.Header -> headerView(r.label, convertView)
+            is SidebarRow.FolderHead -> folderHeadView(r, convertView)
             is SidebarRow.Chat -> chatView(r.conv, convertView)
         }
     }
@@ -473,6 +476,25 @@ class ChatsAdapter(private val act: MainActivity) : BaseAdapter() {
         tv.typeface = Typeface.DEFAULT_BOLD
         tv.isAllCaps = true
         return tv
+    }
+
+    private fun folderHeadView(r: SidebarRow.FolderHead, convertView: View?): View {
+        val root = convertView as? LinearLayout ?: LinearLayout(act).also {
+            it.orientation = LinearLayout.HORIZONTAL
+            it.gravity = Gravity.CENTER_VERTICAL
+            it.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 12), Ui.dp(act, 10))
+        }
+        root.removeAllViews()
+        root.addView(Ui.tv(act, if (r.expanded) "▾ " else "▸ ", 13f, Ui.DIM))
+        val name = Ui.tv(act, r.folder.name, 14f, Ui.TEXT)
+        name.typeface = Typeface.DEFAULT_BOLD
+        name.maxLines = 1
+        name.ellipsize = TextUtils.TruncateAt.END
+        root.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(Ui.tv(act, r.count.toString(), 12f, Ui.DIM))
+        root.setOnClickListener { act.toggleFolder(r.folder.id) }
+        root.setOnLongClickListener { act.folderMenu(r.folder); true }
+        return root
     }
 
     private fun chatView(c: Conversation, convertView: View?): View {

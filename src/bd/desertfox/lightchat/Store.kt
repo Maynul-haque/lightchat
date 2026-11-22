@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 object Store {
     val providers = ArrayList<Provider>()
     val chats = ArrayList<Conversation>() // newest first
+    val folders = ArrayList<Folder>()
     var settings = Settings("You are a helpful assistant.", "", "")
     val logLines = ArrayList<String>()
 
@@ -48,6 +49,12 @@ object Store {
                 if (pa != null) for (i in 0 until pa.length()) {
                     try { providers.add(Provider.from(pa.getJSONObject(i))) }
                     catch (e: Exception) { Store.log("skip corrupt provider entry " + i) }
+                }
+                // v0.6.0: folders (one bad entry must not kill the list).
+                val fa = j.optJSONArray("folders")
+                if (fa != null) for (i in 0 until fa.length()) {
+                    try { folders.add(Folder.from(fa.getJSONObject(i))) }
+                    catch (e: Exception) { Store.log("skip corrupt folder entry " + i) }
                 }
                 backupFile(cf)
             } catch (e: Exception) {
@@ -86,6 +93,15 @@ object Store {
             val seenChats = HashSet<String>()
             val itc = chats.iterator()
             while (itc.hasNext()) if (!seenChats.add(itc.next().id)) itc.remove()
+            val seenFolders = HashSet<String>()
+            val itf = folders.iterator()
+            while (itf.hasNext()) {
+                val f = itf.next()
+                if (f.id.isEmpty() || !seenFolders.add(f.id)) itf.remove()
+            }
+            // Chats pointing at a folder that no longer exists become unfiled.
+            val folderIds = folders.map { it.id }.toSet()
+            for (c in chats) if (c.folderId.isNotEmpty() && c.folderId !in folderIds) c.folderId = ""
         }
         val la = cfgLogArray()
         synchronized(logLines) {
@@ -140,13 +156,16 @@ object Store {
             ctx = appCtx ?: return
             try {
                 val provSnap = ArrayList(providers)
+                val folderSnap = ArrayList(folders)
                 val chatSnap = chats.map { c ->
                     Conversation(c.id, c.title, c.providerId, c.modelId, c.createdAt, c.updatedAt,
-                        c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList())
+                        c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList(),
+                        c.folderId)
                 }
                 cfgText = if (configLoadFailed) null else {
                     val cj = JSONObject()
                     cj.put("providers", JSONArray(provSnap.map { it.toJson() }))
+                    cj.put("folders", JSONArray(folderSnap.map { it.toJson() }))
                     cj.put("settings", settings.toJson())
                     cj.put("seeded", seeded)
                     synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
@@ -245,10 +264,11 @@ object Store {
     /** Resolved provider for a conversation: its own, else the app default. */
     fun effectiveProvider(c: Conversation): Provider? = provider(c.providerId) ?: defaultProvider()
 
-    fun newConversation(): Conversation {
+    fun newConversation(folderId: String = ""): Conversation {
         val dp = defaultProvider()
         val c = Conversation(UUID.randomUUID().toString(), "", dp?.id ?: "", settings.defaultModel,
             System.currentTimeMillis(), System.currentTimeMillis())
+        c.folderId = folderId
         chats.add(0, c)
         save()
         return c
