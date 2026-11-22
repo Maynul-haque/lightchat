@@ -25,17 +25,21 @@ import java.util.Locale
 import java.util.WeakHashMap
 
 object Ui {
-    val BG = 0xFF14151A.toInt()
-    val SURFACE = 0xFF1D2027.toInt()
-    val SIDEBAR = 0xFF191C22.toInt()
-    val ACCENT = 0xFF7C6CF7.toInt()
+    // v0.6.0 (Batch B / UI-1): ChatGPT-like neutral dark greys — the purple
+    // bubble/accent is gone. ACCENT is now a light neutral grey; it is only
+    // used where a light surface needs dark text (picker chip, save button).
+    val BG = 0xFF212121.toInt()
+    val SURFACE = 0xFF2F2F2F.toInt()
+    val SIDEBAR = 0xFF1E1E1E.toInt()
+    val ACCENT = 0xFFD9D9D9.toInt()
     val TEXT = 0xFFECEDF1.toInt()
     val DIM = 0xFF9AA0AC.toInt()
-    val BUBBLE = 0xFF3A3560.toInt()
+    val BUBBLE = 0xFF2F2F2F.toInt()
     val ERROR = 0xFFFF6B6B.toInt()
-    val CODE_BG = 0xFF101218.toInt()
-    val INLINE_CODE_BG = 0xFF262A33.toInt()
-    val INPUT_BG = 0xFF262A33.toInt()
+    val CODE_BG = 0xFF17181C.toInt()
+    val INLINE_CODE_BG = 0xFF3A3A3A.toInt()
+    val INPUT_BG = 0xFF2F2F2F.toInt()
+    val BORDER = 0xFF3A3A3A.toInt()
 
     fun dp(ctx: Context, n: Int): Int = Math.round(n * ctx.resources.displayMetrics.density)
 
@@ -94,7 +98,7 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
     private fun userView(m: Msg, convertView: View?): View {
         val root = convertView as? LinearLayout ?: LinearLayout(act).also {
             it.orientation = LinearLayout.VERTICAL
-            it.setPadding(Ui.dp(act, 10), Ui.dp(act, 3), Ui.dp(act, 10), Ui.dp(act, 3))
+            it.setPadding(0, Ui.dp(act, 4), 0, Ui.dp(act, 4))
         }
         root.orientation = LinearLayout.VERTICAL
         root.removeAllViews()
@@ -113,7 +117,7 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         if (m.content.isNotBlank()) {
             val tv = TextView(act)
             tv.text = m.content
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             tv.setTextColor(Color.WHITE)
             tv.setTextIsSelectable(true)
             val lp = LinearLayout.LayoutParams(
@@ -156,7 +160,7 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
 
     private fun noteView(m: Msg, convertView: View?): View {
         val root = convertView as? FrameLayout ?: FrameLayout(act).also {
-            it.setPadding(Ui.dp(act, 10), Ui.dp(act, 2), Ui.dp(act, 10), Ui.dp(act, 2))
+            it.setPadding(0, Ui.dp(act, 2), 0, Ui.dp(act, 2))
         }
         root.removeAllViews()
         val tv = Ui.tv(act, m.content, 12f, Ui.DIM)
@@ -169,16 +173,17 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
     private fun errorView(m: Msg, convertView: View?): View {
         val root = convertView as? LinearLayout ?: LinearLayout(act).also {
             it.orientation = LinearLayout.VERTICAL
-            it.setPadding(Ui.dp(act, 14), Ui.dp(act, 3), Ui.dp(act, 14), Ui.dp(act, 3))
+            it.setPadding(0, Ui.dp(act, 4), 0, Ui.dp(act, 4))
         }
         root.removeAllViews()
         root.addView(Ui.tv(act, m.content, 14f, Ui.ERROR))
-        val retry = Button(act)
-        retry.text = "Retry"
-        retry.textSize = 13f
+        // v0.6.0: flat Retry text link, not a pill button.
+        val retry = TextView(act)
+        retry.text = "↻ Retry"
+        retry.textSize = 14f
         retry.setTextColor(Ui.TEXT)
-        retry.background = Ui.round(Ui.SURFACE, 10f)
-        retry.isAllCaps = false
+        retry.isClickable = true
+        retry.setPadding(Ui.dp(act, 4), Ui.dp(act, 8), Ui.dp(act, 4), Ui.dp(act, 8))
         retry.setOnClickListener { act.retryLast() }
         val lp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -190,7 +195,7 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
     private fun assistantView(m: Msg, position: Int, convertView: View?): View {
         val root = convertView as? LinearLayout ?: LinearLayout(act).also {
             it.orientation = LinearLayout.VERTICAL
-            it.setPadding(Ui.dp(act, 14), Ui.dp(act, 3), Ui.dp(act, 14), Ui.dp(act, 3))
+            it.setPadding(0, Ui.dp(act, 4), 0, Ui.dp(act, 4))
         }
         root.removeAllViews()
 
@@ -211,7 +216,7 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
             } else if (!block.text.isNullOrBlank()) {
                 val tv = TextView(act)
                 tv.text = Markdown.render(block.text, act, Ui.ACCENT, Ui.INLINE_CODE_BG)
-                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                 tv.setTextColor(Ui.TEXT)
                 tv.setTextIsSelectable(true)
                 tv.movementMethod = LinkMovementMethod.getInstance()
@@ -242,16 +247,19 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         }
 
         if (!act.isStreaming() && m.content.isNotBlank()) {
+            // v0.6.0: flat icon action row (ChatGPT-like) — plain TextView
+            // glyphs, no Button pills. Copy is ⧉ (U+29C9, two joined
+            // squares); the old ⬉ (U+2B09) is an arrow, not a copy icon.
             val row = LinearLayout(act)
             row.orientation = LinearLayout.HORIZONTAL
             row.gravity = Gravity.CENTER_VERTICAL
-            val copy = actionButton("\u2B09")
+            val copy = actionIcon("\u29C9")
             copy.setOnClickListener { Ui.copy(act, m.content) }
             row.addView(copy)
-            val regen = actionButton("\u21BB")
+            val regen = actionIcon("\u21BB")
             val lp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.marginStart = Ui.dp(act, 8)
+            lp.marginStart = Ui.dp(act, 4)
             lp.topMargin = Ui.dp(act, 6)
             regen.setOnClickListener { act.regenerateFrom(m) }
             row.addView(regen, lp)
@@ -267,7 +275,10 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         val scroll = android.widget.HorizontalScrollView(act)
         scroll.isHorizontalScrollBarEnabled = false
         val tbl = android.widget.TableLayout(act)
-        for ((ri, r) in rows.withIndex()) {
+        // v0.6.0: visible 1 dp borders on every cell, and a 200-row cap —
+        // a 1000-row table used to build one TextView per cell and freeze.
+        val shown = rows.take(200)
+        for ((ri, r) in shown.withIndex()) {
             val tr = android.widget.TableRow(act)
             for (cell in r) {
                 val tv = TextView(act)
@@ -276,7 +287,10 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
                 tv.setTextColor(Ui.TEXT)
                 tv.setTypeface(null, if (ri == 0) Typeface.BOLD else Typeface.NORMAL)
                 tv.setPadding(Ui.dp(act, 10), Ui.dp(act, 5), Ui.dp(act, 10), Ui.dp(act, 5))
-                if (ri == 0) tv.setBackgroundColor(Ui.CODE_BG)
+                val cellBg = GradientDrawable()
+                cellBg.setColor(if (ri == 0) Ui.CODE_BG else 0x00000000)
+                cellBg.setStroke(Ui.dp(act, 1), Ui.BORDER)
+                tv.background = cellBg
                 tr.addView(tv)
             }
             tbl.addView(tr)
@@ -286,6 +300,11 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         wrap.orientation = LinearLayout.VERTICAL
         wrap.setPadding(0, Ui.dp(act, 4), 0, Ui.dp(act, 4))
         wrap.addView(scroll)
+        if (rows.size > shown.size) {
+            val note = Ui.tv(act, "Showing first 200 of " + rows.size + " rows", 12f, Ui.DIM)
+            note.setPadding(0, Ui.dp(act, 4), 0, 0)
+            wrap.addView(note)
+        }
         return wrap
     }
 
@@ -340,23 +359,33 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         return wrap
     }
 
-    private fun actionButton(label: String): Button {
-        val b = Button(act)
-        b.text = label
-        b.textSize = 15f
-        b.setTextColor(Ui.DIM)
-        b.background = Ui.round(Ui.SURFACE, 12f)
-        b.isAllCaps = false
-        b.setPadding(Ui.dp(act, 10), Ui.dp(act, 2), Ui.dp(act, 10), Ui.dp(act, 2))
-        b.minWidth = 0
-        b.minimumWidth = 0
-        return b
+    /** Flat icon action: a plain TextView glyph with a 32 dp touch target
+     *  (8 dp padding around a 16 sp glyph), no background, no pill. */
+    private fun actionIcon(label: String): TextView {
+        val t = TextView(act)
+        t.text = label
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+        t.setTextColor(Ui.DIM)
+        t.setPadding(Ui.dp(act, 8), Ui.dp(act, 8), Ui.dp(act, 8), Ui.dp(act, 8))
+        t.isClickable = true
+        t.minWidth = Ui.dp(act, 32)
+        t.minimumWidth = Ui.dp(act, 32)
+        t.minHeight = Ui.dp(act, 32)
+        t.minimumHeight = Ui.dp(act, 32)
+        t.gravity = Gravity.CENTER
+        return t
     }
 
     private fun codeView(code: Markdown.Code): View {
+        // v0.6.0: flatter code box — thin 1 dp border instead of a heavy
+        // rounded fill; Copy/Save are flat text links, not pill buttons.
         val box = LinearLayout(act)
         box.orientation = LinearLayout.VERTICAL
-        box.background = Ui.round(Ui.CODE_BG, 10f)
+        val boxBg = GradientDrawable()
+        boxBg.setColor(Ui.CODE_BG)
+        boxBg.setStroke(Ui.dp(act, 1), Ui.BORDER)
+        boxBg.cornerRadius = 8f
+        box.background = boxBg
         box.setPadding(Ui.dp(act, 10), Ui.dp(act, 6), Ui.dp(act, 10), Ui.dp(act, 8))
 
         val head = LinearLayout(act)
@@ -364,22 +393,20 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         head.gravity = Gravity.CENTER_VERTICAL
         head.addView(Ui.tv(act, if (code.lang.isBlank()) "code" else code.lang, 11f, Ui.DIM))
         head.addView(View(act), LinearLayout.LayoutParams(0, 1, 1f))
-        val cp = Button(act)
+        val cp = TextView(act)
         cp.text = "Copy"
         cp.textSize = 11f
-        cp.setTextColor(Ui.TEXT)
-        cp.background = Ui.round(Ui.SURFACE, 8f)
-        cp.isAllCaps = false
-        cp.setPadding(Ui.dp(act, 10), 0, Ui.dp(act, 10), 0)
+        cp.setTextColor(Ui.DIM)
+        cp.isClickable = true
+        cp.setPadding(Ui.dp(act, 8), Ui.dp(act, 4), Ui.dp(act, 8), Ui.dp(act, 4))
         cp.setOnClickListener { Ui.copy(act, code.code) }
         head.addView(cp)
-        val sv = Button(act)
+        val sv = TextView(act)
         sv.text = "Save"
         sv.textSize = 11f
-        sv.setTextColor(Ui.TEXT)
-        sv.background = Ui.round(Ui.SURFACE, 8f)
-        sv.isAllCaps = false
-        sv.setPadding(Ui.dp(act, 10), 0, Ui.dp(act, 10), 0)
+        sv.setTextColor(Ui.DIM)
+        sv.isClickable = true
+        sv.setPadding(Ui.dp(act, 8), Ui.dp(act, 4), Ui.dp(act, 8), Ui.dp(act, 4))
         val svlp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         svlp.marginStart = Ui.dp(act, 6)
@@ -392,6 +419,8 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         body.typeface = Typeface.MONOSPACE
         body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         body.setTextColor(Ui.TEXT)
+        // v0.6.0: code text is selectable (was copy/save only).
+        body.setTextIsSelectable(true)
         val lp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.topMargin = Ui.dp(act, 4)

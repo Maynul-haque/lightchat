@@ -7,8 +7,8 @@ import org.json.JSONObject
  *  build.sh must be kept in sync (aapt2 link --version-code/--version-name);
  *  ChatClient.USER_AGENT and the Settings About line read this constant. */
 object BuildInfo {
-    const val VERSION_NAME = "0.5.1"
-    const val VERSION_CODE = 13
+    const val VERSION_NAME = "0.6.0"
+    const val VERSION_CODE = 14
 }
 
 class Provider(
@@ -153,14 +153,17 @@ class Conversation(
     }
 }
 
-class Settings(var systemPrompt: String, var defaultProviderId: String, var defaultModel: String) {
+class Settings(var systemPrompt: String, var defaultProviderId: String, var defaultModel: String,
+                var lastUsedModel: String = "") {
     fun toJson(): JSONObject = JSONObject()
         .put("systemPrompt", systemPrompt)
         .put("defaultProviderId", defaultProviderId)
         .put("defaultModel", defaultModel)
+        .put("lastUsedModel", lastUsedModel)
 
     companion object {
         fun from(j: JSONObject) = Settings(j.optString("systemPrompt", "You are a helpful assistant."),
-            j.optString("defaultProviderId"), j.optString("defaultModel"))
+            j.optString("defaultProviderId"), j.optString("defaultModel"),
+            j.optString("lastUsedModel", ""))
     }
 }

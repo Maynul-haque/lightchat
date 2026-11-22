@@ -125,7 +125,7 @@ class MainActivity : Activity() {
         chatList = ListView(this)
         chatList.divider = null
         chatList.dividerHeight = 0
-        chatList.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6))
+        chatList.setPadding(Ui.dp(this, 16), Ui.dp(this, 6), Ui.dp(this, 16), Ui.dp(this, 6))
         chatList.clipToPadding = false
         chatList.setBackgroundColor(Ui.BG)
         chatList.visibility = View.GONE
@@ -174,8 +174,10 @@ class MainActivity : Activity() {
             chip.isAllCaps = false
             chip.setPadding(Ui.dp(this, 16), Ui.dp(this, 8), Ui.dp(this, 16), Ui.dp(this, 8))
             chip.setOnClickListener {
+                // v0.6.0: a chip fills the input — it does not send.
                 input.setText(chipLabels[i])
-                onSend()
+                input.setSelection(input.text.length)
+                input.requestFocus()
             }
             val clp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -216,6 +218,20 @@ class MainActivity : Activity() {
             android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         input.maxLines = 5
+        // v0.6.0: Enter sends (soft keyboard shows a Send key; hardware
+        // Enter sends too, Shift+Enter still makes a newline).
+        input.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                onSend(); true
+            } else false
+        }
+        input.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
+                event.action == android.view.KeyEvent.ACTION_DOWN && !event.isShiftPressed) {
+                onSend(); true
+            } else false
+        }
         input.gravity = Gravity.CENTER_VERTICAL
         val plus = TextView(this)
         plus.text = "＋"
@@ -266,9 +282,10 @@ class MainActivity : Activity() {
         sendBtn = TextView(this)
         sendBtn.text = "➤"
         sendBtn.textSize = 18f
-        sendBtn.setTextColor(android.graphics.Color.WHITE)
+        // v0.6.0: white send button (ChatGPT-like) with a dark arrow.
+        sendBtn.setTextColor(0xFF212121.toInt())
         sendBtn.gravity = Gravity.CENTER
-        sendBtn.background = Ui.round(Ui.ACCENT, 26f)
+        sendBtn.background = Ui.round(0xFFFFFFFF.toInt(), 26f)
         sendBtn.setOnClickListener { if (isStreaming()) stopStream() else onSend() }
         val slp = LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 48))
         slp.marginStart = Ui.dp(this, 8)
@@ -593,18 +610,26 @@ class MainActivity : Activity() {
     }
 
     fun viewFileImageDialog(name: String, absPath: String) {
-        val iv = android.widget.ImageView(this)
-        iv.setImageBitmap(decodeSample(absPath, 1600))
-        iv.adjustViewBounds = true
-        val mime = Attachments.mimeFromName(name).ifEmpty { "image/png" }
-        val b = android.app.AlertDialog.Builder(this)
-        b.setTitle(name).setView(iv)
-        b.setPositiveButton("Close", null)
-        b.setNeutralButton("Share") { _, _ -> shareFile(name, mime, absPath) }
-        if (android.os.Build.VERSION.SDK_INT >= 29) {
-            b.setNegativeButton("Save") { _, _ -> saveImageFileToGallery(name, absPath) }
-        }
-        b.show()
+        // v0.6.0: decode off the UI thread (was a blocking decode in the
+        // dialog call). The dialog opens once the bitmap is ready.
+        Thread {
+            val bmp = decodeSample(absPath, 1600)
+            runOnUiThread {
+                if (bmp == null) { Ui.toast(this, "Could not decode image"); return@runOnUiThread }
+                val iv = android.widget.ImageView(this)
+                iv.setImageBitmap(bmp)
+                iv.adjustViewBounds = true
+                val mime = Attachments.mimeFromName(name).ifEmpty { "image/png" }
+                val b = android.app.AlertDialog.Builder(this)
+                b.setTitle(name).setView(iv)
+                b.setPositiveButton("Close", null)
+                b.setNeutralButton("Share") { _, _ -> shareFile(name, mime, absPath) }
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    b.setNegativeButton("Save") { _, _ -> saveImageFileToGallery(name, absPath) }
+                }
+                b.show()
+            }
+        }.start()
     }
 
     fun viewBitmapDialog(name: String, bmp: android.graphics.Bitmap) {
@@ -666,7 +691,6 @@ class MainActivity : Activity() {
             if (f == null) { Ui.toast(this, "Download failed (see Logs)"); return@download }
             val rel = f.absolutePath.removePrefix(filesDir.absolutePath + "/")
             val uri = android.net.Uri.parse("content://bd.desertfox.lightchat.files/" + rel)
-            grantUriPermission(packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
             val i = android.content.Intent(android.content.Intent.ACTION_VIEW)
             i.setDataAndType(uri, Attachments.mimeFromName(f.name).ifEmpty { "application/octet-stream" })
             i.clipData = android.content.ClipData.newRawUri(f.name, uri)
@@ -677,6 +701,8 @@ class MainActivity : Activity() {
     }
 
     fun saveCodeAsFile(code: String, lang: String) {
+        // v0.6.0: the extension comes from the model's lang string — sanitise
+        // it to [a-z0-9] (max 6) so "../" can never escape the downloads dir.
         val ext = when (lang.trim().lowercase()) {
             "kotlin", "kt" -> "kt"; "java" -> "java"; "python", "py" -> "py"
             "javascript", "js" -> "js"; "typescript", "ts" -> "ts"; "json" -> "json"
@@ -684,7 +710,8 @@ class MainActivity : Activity() {
             "bash", "sh", "shell" -> "sh"; "c" -> "c"; "cpp", "c++" -> "cpp"
             "sql" -> "sql"; "markdown", "md" -> "md"; "yaml", "yml" -> "yml"
             "" -> "txt"
-            else -> lang.trim().lowercase().take(6)
+            else -> lang.trim().lowercase()
+                .filter { it in 'a'..'z' || it in '0'..'9' }.take(6).ifEmpty { "txt" }
         }
         try {
             val f = java.io.File(OutputKit.downloadsDir(this),
@@ -762,7 +789,6 @@ class MainActivity : Activity() {
     private fun shareFile(name: String, mime: String, absPath: String) {
         val rel = absPath.removePrefix(filesDir.absolutePath + "/")
         val uri = android.net.Uri.parse("content://bd.desertfox.lightchat.files/" + rel)
-        grantUriPermission(packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         val i = android.content.Intent(android.content.Intent.ACTION_SEND)
         i.type = mime
         i.putExtra(android.content.Intent.EXTRA_STREAM, uri)
@@ -834,7 +860,13 @@ class MainActivity : Activity() {
 
     private fun setStreamingUI(streaming: Boolean) {
         sendBtn.text = if (streaming) "■" else "➤"
-        sendBtn.background = Ui.round(if (streaming) Ui.ERROR else Ui.ACCENT, 26f)
+        if (streaming) {
+            sendBtn.background = Ui.round(Ui.ERROR, 26f)
+            sendBtn.setTextColor(android.graphics.Color.WHITE)
+        } else {
+            sendBtn.background = Ui.round(0xFFFFFFFF.toInt(), 26f)
+            sendBtn.setTextColor(0xFF212121.toInt())
+        }
         chatAdapter?.notifyDataSetChanged()
     }
 
@@ -941,10 +973,18 @@ class MainActivity : Activity() {
     // ---- model picker ----
 
     private fun openModelPicker() {
-        Dialogs.modelPicker(this) { p, model -> applyModel(p, model) }
+        // v0.6.0: switching model mid-stream is blocked, like opening
+        // another chat mid-stream.
+        if (isStreaming()) { Ui.toast(this, "Stop the current reply first"); return }
+        val c = conv
+        val current = if (c != null && c.modelId.isNotBlank()) c.modelId
+        else Store.settings.defaultModel
+        Dialogs.modelPicker(this, current) { p, model -> applyModel(p, model) }
     }
 
     private fun applyModel(p: Provider, model: String) {
+        // v0.6.0: remember the last-used model — the picker shows it first.
+        Store.settings.lastUsedModel = model
         val c = conv
         if (c == null) {
             Store.settings.defaultProviderId = p.id
