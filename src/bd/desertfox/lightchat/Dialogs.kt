@@ -83,9 +83,12 @@ object Dialogs {
             override fun getItemViewType(position: Int): Int = 0
             override fun getView(position: Int, convertView: android.view.View?, parent: ViewGroup): android.view.View {
                 val r = rows[position]
-                val box = LinearLayout(act)
-                box.orientation = LinearLayout.VERTICAL
-                box.setPadding(Ui.dp(act, 20), Ui.dp(act, 9), Ui.dp(act, 20), Ui.dp(act, 9))
+                // P1-10: reuse the row view instead of allocating a layout per row.
+                val box = convertView as? LinearLayout ?: LinearLayout(act).also {
+                    it.orientation = LinearLayout.VERTICAL
+                    it.setPadding(Ui.dp(act, 20), Ui.dp(act, 9), Ui.dp(act, 20), Ui.dp(act, 9))
+                }
+                box.removeAllViews()
                 if (r.type == 0) {
                     val t = Ui.tv(act, r.text, 12f, Ui.DIM)
                     t.typeface = android.graphics.Typeface.DEFAULT_BOLD

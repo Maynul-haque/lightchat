@@ -143,6 +143,18 @@ class ProvidersActivity : Activity() {
         form.addView(keyRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        // P1-14: Provider.enabled existed in the model but had no UI — the
+        // only way to stop using a provider was to delete it.
+        val enabledCb = android.widget.CheckBox(this)
+        enabledCb.text = "Enabled (disabled providers are hidden from the model picker)"
+        enabledCb.textSize = 13f
+        enabledCb.setTextColor(Ui.TEXT)
+        enabledCb.isChecked = existing?.enabled ?: true
+        val ecbLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        ecbLp.topMargin = Ui.dp(this, 8)
+        form.addView(enabledCb, ecbLp)
+
         // Per-provider custom headers, one "Name: value" per line (blank = none).
         // Used for gateways that need extra headers, e.g. OpenRouter's
         // HTTP-Referer / X-Title. Authorization / User-Agent can never be set here.
@@ -254,6 +266,7 @@ class ProvidersActivity : Activity() {
         fun tempProvider(): Provider = Provider(
             existing?.id ?: "tmp", nameEt.text.toString().trim(),
             urlEt.text.toString().trim(), keyEt.text.toString(), ArrayList(localModels),
+            enabledCb.isChecked,
             customHeaders = parseHeaders(headersEt.text.toString()))
 
         fetchBtn.setOnClickListener {
@@ -402,12 +415,13 @@ class ProvidersActivity : Activity() {
                 val headers = parseHeaders(headersEt.text.toString())
                 if (existing == null) {
                     Store.providers.add(Provider(UUID.randomUUID().toString(), name, url,
-                        keyEt.text.toString(), ArrayList(localModels), true, HashSet(allowedSel),
+                        keyEt.text.toString(), ArrayList(localModels), enabledCb.isChecked, HashSet(allowedSel),
                         LinkedHashMap(headers)))
                 } else {
                     existing.name = name
                     existing.baseUrl = url
                     existing.apiKey = keyEt.text.toString()
+                    existing.enabled = enabledCb.isChecked
                     existing.models.clear()
                     existing.models.addAll(localModels)
                     existing.allowed.clear()

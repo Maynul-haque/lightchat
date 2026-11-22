@@ -20,6 +20,27 @@ object Attachments {
     const val MAX_DIM = 1568
     const val JPEG_Q = 85
     const val TEXT_CAP = 100_000
+    /** P0-5: refuse imports over 50 MB instead of reading them into RAM. */
+    const val MAX_IMPORT_BYTES = 50L * 1024 * 1024
+
+    // P1-3: cache extracted text and base64 per Att.id so a PDF/image is
+    // not re-read, re-extracted or re-encoded on every send.
+    private val textCache = HashMap<String, String?>()
+    private val b64Cache = HashMap<String, String>()
+
+    private fun readCapped(ins: java.io.InputStream, cap: Long): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            val n = ins.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > cap) return null
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
 
     private var appCtx: Context? = null
 
@@ -99,7 +120,12 @@ object Attachments {
                 }
             } catch (e: Exception) {}
             if (mime.isBlank()) mime = mimeFromName(name)
-            val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: return null
+            // P0-5: refuse oversized files before reading them into RAM.
+            if (size > MAX_IMPORT_BYTES) {
+                Store.log("attach too large: " + name + " " + sizeLabel(size) + " (limit 50 MB)")
+                return null
+            }
+            val bytes = cr.openInputStream(uri)?.use { readCapped(it, MAX_IMPORT_BYTES) } ?: return null
             if (size < 0) size = bytes.size.toLong()
             val id = UUID.randomUUID().toString()
             if (mime.startsWith("image/")) {
@@ -220,13 +246,7 @@ object Attachments {
 
     /** Append a PDF/DOCX attachment's extracted text, or a failure note. */
     private fun appendExtracted(sb: StringBuilder, a: Att) {
-        val f = File(homeDir(), a.path)
-        val bytes = try {
-            if (f.exists()) f.readBytes() else null
-        } catch (e: Exception) {
-            null
-        }
-        val txt = if (bytes != null) DocText.extract(a.name, bytes) else null
+        val txt = extractCached(a)
         if (sb.isNotEmpty()) sb.append("\n\n")
         if (txt.isNullOrBlank()) {
             sb.append("[Attached file: ").append(a.name).append(", ")
@@ -236,6 +256,34 @@ object Attachments {
             sb.append("[Attached file: ").append(a.name).append("]\n").append(txt)
             if (txt.length >= TEXT_CAP)
                 sb.append("\n[... file truncated at ").append(TEXT_CAP / 1000).append(" KB]")
+        }
+    }
+
+    /** Extracted text for a PDF/DOCX attachment, cached per Att.id (P1-3). */
+    private fun extractCached(a: Att): String? {
+        if (textCache.containsKey(a.id)) return textCache[a.id]
+        val f = File(homeDir(), a.path)
+        val bytes = try {
+            if (f.exists()) f.readBytes() else null
+        } catch (e: Exception) {
+            null
+        }
+        val txt = if (bytes != null) DocText.extract(a.name, bytes) else null
+        textCache[a.id] = txt
+        return txt
+    }
+
+    /** Base64 of an image attachment file, cached per Att.id (P1-3). */
+    private fun b64Cached(a: Att): String? {
+        b64Cache[a.id]?.let { return it }
+        return try {
+            val f = File(homeDir(), a.path)
+            val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
+            b64Cache[a.id] = b64
+            b64
+        } catch (e: Exception) {
+            Store.log("attach read failed: " + a.name)
+            null
         }
     }
 
@@ -268,20 +316,21 @@ object Attachments {
         val arr = JSONArray()
         arr.put(JSONObject().put("type", "text").put("text", sb.toString()))
         for (a in m.atts) if (a.kind == "image") {
-            try {
-                val f = File(homeDir(), a.path)
-                val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
-                arr.put(JSONObject().put("type", "image_url")
-                    .put("image_url", JSONObject().put("url", "data:" + a.mime + ";base64," + b64)))
-            } catch (e: Exception) {
-                Store.log("attach read failed: " + a.name)
-            }
+            val b64 = b64Cached(a) ?: continue
+            arr.put(JSONObject().put("type", "image_url")
+                .put("image_url", JSONObject().put("url", "data:" + a.mime + ";base64," + b64)))
         }
         return arr
     }
 
+    // P1-1: thumbnail cache — thumbs were decoded from disk on the UI thread
+    // on every repaint.
+    private val thumbCache = android.util.LruCache<String, android.graphics.Bitmap>(16)
+
     /** Small bitmap for bubble/chip thumbnails; null when the file is missing. */
     fun thumb(path: String, px: Int): android.graphics.Bitmap? {
+        val key = path + "@" + px
+        try { thumbCache.get(key)?.let { return it } } catch (e: Exception) {}
         return try {
             val f = File(homeDir(), path)
             if (!f.exists()) return null
@@ -293,11 +342,15 @@ object Attachments {
             while (Math.max(opts.outWidth, opts.outHeight) / (s * 2) >= px) s *= 2
             opts.inSampleSize = s
             opts.inJustDecodeBounds = false
-            BitmapFactory.decodeFile(f.absolutePath, opts)
+            val bmp = BitmapFactory.decodeFile(f.absolutePath, opts)
+            if (bmp != null) try { thumbCache.put(key, bmp) } catch (e: Exception) {}
+            bmp
         } catch (e: Exception) { null }
     }
 
     fun deleteAtt(a: Att) {
+        textCache.remove(a.id)
+        b64Cache.remove(a.id)
         try { File(homeDir(), a.path).delete() } catch (e: Exception) {}
     }
 

@@ -10,6 +10,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.widget.AbsListView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -29,6 +30,7 @@ class MainActivity : Activity() {
     private lateinit var scrim: View
     private lateinit var sidebarPanel: LinearLayout
     private lateinit var chatsList: ListView
+    private lateinit var scrollDownBtn: TextView
 
     private var conv: Conversation? = null
     private var chatAdapter: ChatAdapter? = null
@@ -93,6 +95,16 @@ class MainActivity : Activity() {
         chatList.clipToPadding = false
         chatList.setBackgroundColor(Ui.BG)
         chatList.visibility = View.GONE
+        // P1-2: track whether the user scrolled away from the bottom, so the
+        // floating ↓ button can appear instead of a forced scroll.
+        chatList.setOnScrollListener(object : AbsListView.OnScrollListener {
+            override fun onScrollStateChanged(v: AbsListView?, s: Int) {}
+            override fun onScroll(v: AbsListView?, first: Int, visible: Int, total: Int) {
+                if (!isStreaming()) { scrollDownBtn.visibility = View.GONE; return }
+                val atBottom = first + visible >= total
+                scrollDownBtn.visibility = if (atBottom) View.GONE else View.VISIBLE
+            }
+        })
         val listLp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         content.addView(chatList, listLp)
@@ -224,6 +236,22 @@ class MainActivity : Activity() {
         val slp = LinearLayout.LayoutParams(Ui.dp(this, 48), Ui.dp(this, 48))
         slp.marginStart = Ui.dp(this, 8)
         bar2.addView(sendBtn, slp)
+
+        // Floating scroll-to-bottom button (P1-2): shown only when the user
+        // has scrolled up while a reply is streaming.
+        scrollDownBtn = TextView(this)
+        scrollDownBtn.text = "↓"
+        scrollDownBtn.textSize = 18f
+        scrollDownBtn.setTextColor(Ui.TEXT)
+        scrollDownBtn.gravity = Gravity.CENTER
+        scrollDownBtn.background = Ui.round(Ui.SURFACE, 20f)
+        scrollDownBtn.visibility = View.GONE
+        scrollDownBtn.setOnClickListener { scrollToBottom() }
+        val sdbLp = FrameLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40))
+        sdbLp.gravity = Gravity.BOTTOM or Gravity.END
+        sdbLp.marginEnd = Ui.dp(this, 16)
+        sdbLp.bottomMargin = Ui.dp(this, 96)
+        root.addView(scrollDownBtn, sdbLp)
 
         // Sidebar
         scrim = View(this)
@@ -553,9 +581,11 @@ class MainActivity : Activity() {
     fun viewOutputImage(alt: String, url: String) {
         val nm = alt.ifBlank { "image" }
         if (url.startsWith("data:")) {
-            val b = OutputKit.fromDataUrl(url)
-            if (b == null) { Ui.toast(this, "Could not decode image"); return }
-            viewBitmapDialog(nm, b)
+            // P0-6: decode off the UI thread (was a blocking full-res decode).
+            OutputKit.loadDataUrl(this, url, 1600) { b ->
+                if (b == null) Ui.toast(this, "Could not decode image")
+                else viewBitmapDialog(nm, b)
+            }
             return
         }
         val cached = OutputKit.cacheFile(this, url)
@@ -749,10 +779,18 @@ class MainActivity : Activity() {
         flag = f
         val history = c.messages.filter { it !== placeholder && it.role == "user" || it !== placeholder && it.role == "assistant" }
         Thread {
+            // P0-1: the delta piece used to be ignored (onDelta = { scheduleUi() }),
+            // so the placeholder stayed blank until the whole reply arrived.
+            // Append each piece on the UI thread, then repaint only the last row.
             ChatClient.streamChat(p, model, Store.settings.systemPrompt, history, f,
-                onDelta = { scheduleUi() },
+                onDelta = { piece ->
+                    uiHandler.post {
+                        placeholder.content += piece
+                        scheduleUi()
+                    }
+                },
                 onDone = { full, tokens -> runOnUiThread { doneStream(full, tokens, placeholder) } },
-                onError = { msg -> runOnUiThread { failStream(msg) } })
+                onError = { msg, partial -> runOnUiThread { failStream(msg, partial) } })
         }.start()
     }
 
@@ -779,15 +817,23 @@ class MainActivity : Activity() {
         scrollToBottom()
     }
 
-    private fun failStream(msg: String) {
+    private fun failStream(msg: String, partial: String = "") {
         Store.log("chat error — " + msg)
         val c = conv ?: return
         flag = null
         setStreamingUI(false)
-        // drop the empty placeholder, add an error row
-        if (c.messages.isNotEmpty() && c.messages.last().role == "assistant" &&
-            c.messages.last().content.isBlank()) c.messages.removeAt(c.messages.size - 1)
+        // P1-5: keep any partial reply text instead of discarding it. The
+        // placeholder holds the streamed text already (P0-1 appends deltas);
+        // if the error carried partial text, use that. Only a blank
+        // placeholder is dropped, and the error row goes below the partial.
+        val last = c.messages.lastOrNull()
+        if (last != null && last.role == "assistant") {
+            if (partial.isNotBlank()) last.content = partial
+            if (last.content.isBlank()) c.messages.removeAt(c.messages.size - 1)
+        }
         c.messages.add(Msg("error", msg, System.currentTimeMillis()))
+        Store.touch(c)
+        Store.save()
         chatAdapter?.notifyDataSetChanged()
         scrollToBottom()
     }
@@ -811,6 +857,7 @@ class MainActivity : Activity() {
     }
 
     private fun scrollToBottom() {
+        scrollDownBtn.visibility = View.GONE
         chatList.post { chatList.setSelection((chatAdapter?.count ?: 1) - 1) }
     }
 
@@ -831,9 +878,26 @@ class MainActivity : Activity() {
         }
     }
 
+    // P0-1 / P1-2: repaint only the last (streaming) row in place instead of
+    // notifyDataSetChanged() on every tick, and auto-scroll only if the list
+    // was already at the bottom — otherwise show the floating ↓ button.
     private fun paintStream() {
-        chatAdapter?.notifyDataSetChanged()
-        if (isStreaming()) chatList.setSelection((chatAdapter?.count ?: 1) - 1)
+        val adapter = chatAdapter ?: return
+        val lastPos = adapter.count - 1
+        if (lastPos < 0) return
+        val first = chatList.firstVisiblePosition
+        val last = chatList.lastVisiblePosition
+        val atBottom = last >= lastPos
+        if (lastPos in first..last) {
+            val row = chatList.getChildAt(lastPos - first)
+            adapter.getView(lastPos, row, chatList)
+        }
+        if (isStreaming()) {
+            if (atBottom) scrollToBottom()
+            else scrollDownBtn.visibility = View.VISIBLE
+        } else {
+            scrollDownBtn.visibility = View.GONE
+        }
     }
 
     // ---- model picker ----

@@ -39,9 +39,11 @@ object ChatClient {
      *  fingerprint for Chrome, so Cloudflare-fronted gateways flag it as a bot
      *  (HTTP 403 "Just a moment..."). RikkaHub uses an honest app UA and its
      *  /models fetch works on the same gateways. */
-    private const val USER_AGENT = "LightChat/0.4.0"
+    private const val USER_AGENT = "LightChat/" + BuildInfo.VERSION_NAME
     private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 
+    // P1-11: one shared client for everything. Per-call timeouts are set on
+    // the Call (call.timeout()), never by building a new client per request.
     private val baseHttp = OkHttpClient.Builder()
         .connectTimeout(CONNECT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(READ_MS, TimeUnit.MILLISECONDS)
@@ -50,9 +52,7 @@ object ChatClient {
         .retryOnConnectionFailure(true)
         .build()
 
-    private fun http(readMs: Long): OkHttpClient =
-        if (readMs == READ_MS) baseHttp
-        else baseHttp.newBuilder().readTimeout(readMs, TimeUnit.MILLISECONDS).build()
+    private fun http(): OkHttpClient = baseHttp
 
     private fun baseUrl(p: Provider): String {
         var b = p.baseUrl.trim()
@@ -125,10 +125,25 @@ object ChatClient {
         return b.build()
     }
 
+    // P1-3: trim sent history — last 20 messages and ~32k chars, system
+    // prompt always kept. Long chats used to re-send 100k+ tokens per request.
+    private const val MAX_HISTORY_MSGS = 20
+    private const val MAX_HISTORY_CHARS = 32_000
+
     private fun historyJson(system: String, history: List<Msg>): JSONArray {
         val arr = JSONArray()
         if (system.isNotBlank()) arr.put(JSONObject().put("role", "system").put("content", system))
-        for (m in history) if (m.role == "user" || m.role == "assistant") {
+        val kept = ArrayList<Msg>()
+        for (m in history) if (m.role == "user" || m.role == "assistant") kept.add(m)
+        var trimmed = false
+        while (kept.size > MAX_HISTORY_MSGS) { kept.removeAt(0); trimmed = true }
+        var chars = kept.sumOf { it.content.length }
+        while (kept.size > 1 && chars > MAX_HISTORY_CHARS) {
+            chars -= kept.removeAt(0).content.length
+            trimmed = true
+        }
+        if (trimmed) Store.log("history trimmed to " + kept.size + " messages for this request")
+        for (m in kept) {
             if (m.role == "user" && m.atts.isNotEmpty()) {
                 arr.put(JSONObject().put("role", m.role).put("content", Attachments.buildContent(m)))
             } else if (m.content.isNotBlank()) {
@@ -146,36 +161,39 @@ object ChatClient {
     }
 
     /**
-     * Blocking streaming chat. Call from a worker thread. One non-streaming
-     * retry when the streaming request itself errors. A 200 whose payload
-     * carries an error object is a failure, never a reply.
+     * Blocking streaming chat. Call from a worker thread. A 200 whose payload
+     * carries an error object is a failure, never a reply. onError receives
+     * the message plus any partial text already streamed (P1-5: the partial
+     * reply is kept, not discarded).
      */
     fun streamChat(p: Provider, model: String, system: String, history: List<Msg>,
                    flag: StopFlag, onDelta: (String) -> Unit,
-                   onDone: (String, Int) -> Unit, onError: (String) -> Unit) {
+                   onDone: (String, Int) -> Unit, onError: (String, String) -> Unit) {
         var sawFirstChunk = false
         var resp: Response? = null
         var firstMs = FIRST_CHUNK_MS
+        val sb = StringBuilder()
+        var tokens = -1
         try {
+            // P1-4: no temperature parameter — reasoning models reject a
+            // non-default temperature with HTTP 400.
             val body = JSONObject()
                 .put("model", model)
                 .put("messages", historyJson(system, history))
                 .put("stream", true)
-                .put("temperature", 0.7)
             // Providers often take longer to start replying when a file must be
             // processed first; give those requests a wider first-chunk window.
             val lastUser = history.lastOrNull { it.role == "user" }
             firstMs = if (lastUser != null && lastUser.atts.isNotEmpty()) 90000L else FIRST_CHUNK_MS
-            val call = http(firstMs).newCall(
+            val call = http().newCall(
                 req(p, "/chat/completions", "text/event-stream",
                     body.toString().toByteArray(Charsets.UTF_8)))
+            call.timeout().timeout(firstMs, TimeUnit.MILLISECONDS)
             flag.call = call
             val r = call.execute()
             resp = r
             val code = r.code
             if (code in 200..299) {
-                val sb = StringBuilder()
-                var tokens = -1
                 var failed = false
                 val source = r.body!!.source()
                 loop@ while (true) {
@@ -190,6 +208,7 @@ object ChatClient {
                     if (!sawFirstChunk) {
                         sawFirstChunk = true
                         try { source.timeout().timeout(READ_MS, TimeUnit.MILLISECONDS) } catch (e: Exception) {}
+                        try { call.timeout().timeout(READ_MS, TimeUnit.MILLISECONDS) } catch (e: Exception) {}
                     }
                     val j = try { JSONObject(payload) } catch (e: Exception) { continue }
                     val err = j.optJSONObject("error")
@@ -197,7 +216,7 @@ object ChatClient {
                         failed = true
                         val m = err.optString("message").ifEmpty { err.optString("code", "error") }
                         Store.log("chat 200-with-error: " + m)
-                        onError(m)
+                        onError(m, sb.toString())
                         return
                     }
                     val choices = j.optJSONArray("choices")
@@ -214,22 +233,31 @@ object ChatClient {
                 }
                 if (failed) return
                 if (flag.stop.get()) { onDone(sb.toString(), tokens); return }
-                if (sb.isBlank()) { onError("Invalid response from provider"); return }
+                if (sb.isBlank()) { onError("Invalid response from provider", ""); return }
                 onDone(sb.toString(), tokens)
             } else {
-                Store.log("chat HTTP " + code + " — trying non-streaming fallback")
-                try {
-                    val r2 = nonStreaming(p, model, system, history)
-                    onDone(r2.first, r2.second)
-                } catch (he: HttpErr) {
-                    onError(he.status.toString() + " — " + (he.message ?: "error"))
-                } catch (e: Exception) {
-                    onError(netMsg(e, true))
+                // P1-8: fall back to non-streaming only on 5xx. Auth (401/403)
+                // and rate-limit (429) errors must not be sent twice.
+                val errBody = try { bodyText(r, MAX_BODY) } catch (e: Exception) { "" }
+                val msg = code.toString() + " — " + providerMsg(errBody).ifEmpty { "HTTP " + code }
+                if (code in 500..599) {
+                    Store.log("chat HTTP " + code + " — retrying non-streaming once after backoff")
+                    try { Thread.sleep(750) } catch (e: Exception) {}
+                    try {
+                        val r2 = nonStreaming(p, model, system, history)
+                        onDone(r2.first, r2.second)
+                    } catch (he: HttpErr) {
+                        onError(he.status.toString() + " — " + (he.message ?: "error"), sb.toString())
+                    } catch (e: Exception) {
+                        onError(netMsg(e, true), sb.toString())
+                    }
+                } else {
+                    onError(msg, sb.toString())
                 }
             }
         } catch (e: Exception) {
-            if (flag.stop.get()) onDone("", -1)
-            else onError(netMsg(e, sawFirstChunk, (firstMs / 1000).toInt()))
+            if (flag.stop.get()) onDone(sb.toString(), -1)
+            else onError(netMsg(e, sawFirstChunk, (firstMs / 1000).toInt()), sb.toString())
         } finally {
             try { resp?.close() } catch (e: Exception) {}
         }
@@ -241,8 +269,7 @@ object ChatClient {
             .put("model", model)
             .put("messages", historyJson(system, history))
             .put("stream", false)
-            .put("temperature", 0.7)
-        val r = http(READ_MS).newCall(
+        val r = http().newCall(
             req(p, "/chat/completions", "application/json",
                 body.toString().toByteArray(Charsets.UTF_8))).execute()
         r.use { resp ->
@@ -267,39 +294,54 @@ object ChatClient {
         }
     }
 
-    /** Strict probe: a real non-empty reply passes; 429 passes (proves entitlement). */
+    /** Strict probe: a real non-empty reply passes; 429 passes (proves entitlement).
+     *  P1-13: no max_tokens on the probe — reasoning models reject it (they
+     *  want max_completion_tokens or none). On a 400, retry once with
+     *  max_completion_tokens. */
     fun testProvider(p: Provider, model: String): TestResult {
         try {
-            val body = JSONObject()
-                .put("model", model)
-                .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
-                .put("max_tokens", 1)
-                .put("stream", false)
-            val r = http(READ_MS).newCall(
-                req(p, "/chat/completions", "application/json",
-                    body.toString().toByteArray(Charsets.UTF_8))).execute()
-            r.use { resp ->
-                val code = resp.code
-                if (code == 429) return TestResult(true, "rate limited — the key works")
-                if (code in 200..299) {
-                    val j = JSONObject(bodyText(resp, MAX_BODY))
-                    val err = j.optJSONObject("error")
-                    if (err != null) return TestResult(false, err.optString("message").ifEmpty { "provider error" })
-                    val content = j.optJSONArray("choices")?.optJSONObject(0)
-                        ?.optJSONObject("message")?.optString("content") ?: ""
-                    return if (content.isNotEmpty()) TestResult(true, "ok")
-                    else TestResult(false, "empty reply")
-                }
-                return TestResult(false, "HTTP " + code + " — " + providerMsg(bodyText(resp, MAX_BODY)))
-            }
+            val first = probeOnce(p, model, null)
+            if (first.ok || !first.detail.startsWith("RETRY400:")) return first
+            // 400 on the plain probe: retry once with max_completion_tokens.
+            val retry = probeOnce(p, model, JSONObject().put("max_completion_tokens", 16))
+            return if (retry.detail.startsWith("RETRY400:")) TestResult(false, retry.detail.removePrefix("RETRY400:")) else retry
         } catch (e: Exception) {
             return TestResult(false, netMsg(e, false))
         }
     }
 
+    private fun probeOnce(p: Provider, model: String, extra: JSONObject?): TestResult {
+        val body = JSONObject()
+            .put("model", model)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
+            .put("stream", false)
+        if (extra != null) for (k in extra.keys()) body.put(k, extra.get(k))
+        val r = http().newCall(
+            req(p, "/chat/completions", "application/json",
+                body.toString().toByteArray(Charsets.UTF_8))).execute()
+        r.use { resp ->
+            val code = resp.code
+            if (code == 429) return TestResult(true, "rate limited — the key works")
+            if (code in 200..299) {
+                val j = JSONObject(bodyText(resp, MAX_BODY))
+                val err = j.optJSONObject("error")
+                if (err != null) return TestResult(false, err.optString("message").ifEmpty { "provider error" })
+                val content = j.optJSONArray("choices")?.optJSONObject(0)
+                    ?.optJSONObject("message")?.optString("content") ?: ""
+                return if (content.isNotEmpty()) TestResult(true, "ok")
+                else TestResult(false, "empty reply")
+            }
+            val detail = "HTTP " + code + " — " + providerMsg(bodyText(resp, MAX_BODY))
+            return if (code == 400) TestResult(false, "RETRY400:" + detail)
+            else TestResult(false, detail)
+        }
+    }
+
     /** GET /models. An empty list never wipes the stored one (throws instead). */
     fun fetchModels(p: Provider): List<String> {
-        val r = http(30000).newCall(req(p, "/models", "application/json", null)).execute()
+        val call = http().newCall(req(p, "/models", "application/json", null))
+        call.timeout().timeout(30000, TimeUnit.MILLISECONDS)
+        val r = call.execute()
         r.use { resp ->
             val code = resp.code
             if (code != 200) {
