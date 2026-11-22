@@ -16,21 +16,44 @@ import android.widget.Toast
 
 object Dialogs {
 
+    /** Batch C — beautiful dialogs: the default AlertDialog is a square box
+     *  with sharp corners. Rounded corners (18 dp), a soft 1 dp border and
+     *  the neutral dark surface matching the ChatGPT-like theme. Call AFTER
+     *  show() — the buttons only exist then. The app theme is already dark
+     *  (Theme.Material.NoActionBar), so the dialog's default light text
+     *  stays readable on the dark surface. */
+    fun beautify(dlg: AlertDialog): AlertDialog {
+        val bg = android.graphics.drawable.GradientDrawable()
+        bg.setColor(Ui.SURFACE)
+        bg.cornerRadius = Ui.dp(dlg.context, 18).toFloat()
+        bg.setStroke(Ui.dp(dlg.context, 1), Ui.BORDER)
+        dlg.window?.setBackgroundDrawable(bg)
+        dlg.findViewById<TextView>(android.R.id.title)?.setTextColor(Ui.TEXT)
+        dlg.findViewById<TextView>(android.R.id.message)?.setTextColor(Ui.TEXT)
+        for (b in arrayOf(AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE,
+            AlertDialog.BUTTON_NEUTRAL)) {
+            dlg.getButton(b)?.setTextColor(0xFFFFFFFF.toInt())
+        }
+        return dlg
+    }
+
     fun confirm(act: Activity, title: String, msg: String, yesLabel: String, onYes: () -> Unit) {
-        AlertDialog.Builder(act).setTitle(title).setMessage(msg)
+        beautify(AlertDialog.Builder(act).setTitle(title).setMessage(msg)
             .setPositiveButton(yesLabel) { _, _ -> onYes() }
             .setNegativeButton("Cancel", null)
-            .show()
+            .show())
     }
 
     fun input(act: Activity, title: String, prefill: String, onOk: (String) -> Unit) {
         val et = EditText(act)
         et.setText(prefill)
+        et.setTextColor(Ui.TEXT)
+        et.setHintTextColor(Ui.DIM)
         et.setPadding(Ui.dp(act, 20), Ui.dp(act, 12), Ui.dp(act, 20), Ui.dp(act, 12))
-        AlertDialog.Builder(act).setTitle(title).setView(et)
+        beautify(AlertDialog.Builder(act).setTitle(title).setView(et)
             .setPositiveButton("OK") { _, _ -> onOk(et.text.toString().trim()) }
             .setNegativeButton("Cancel", null)
-            .show()
+            .show())
     }
 
     /** Model picker grouped by provider. Model tap -> onPick. "Fetch models first" opens Providers.
@@ -187,6 +210,7 @@ object Dialogs {
             .setNegativeButton("Cancel", null).create()
         dlgRef = dlg
         dlg.show()
+        beautify(dlg)
         dlg.window?.setLayout((act.resources.displayMetrics.widthPixels * 0.85f).toInt(),
             (act.resources.displayMetrics.heightPixels * 0.72f).toInt())
     }
