@@ -58,6 +58,18 @@ class MainActivity : Activity() {
         TraceLog.init(this)
         TraceLog.installCrashHandler()
         TraceLog.log("app", "start v" + BuildInfo.VERSION_NAME)
+        // v0.6.1: the system may destroy this Activity while the camera app
+        // is in front; restore the pending photo file so OK in the camera
+        // still attaches it (before this, camFile was a plain field and was
+        // lost, so the OK result silently attached nothing).
+        savedInstanceState?.getString("camFile")?.let { p ->
+            val f = java.io.File(p)
+            if (f.parentFile == Attachments.dir(this)) {
+                camFile = f
+                camId = savedInstanceState.getString("camId")
+                TraceLog.log("attach", "camera file restored after recreate: " + f.name)
+            }
+        }
         try {
             TraceLog.log("app", "Store.load start")
             Store.load(this)
@@ -90,6 +102,14 @@ class MainActivity : Activity() {
                 ": " + (e.message ?: ""))
             throw e
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        // v0.6.1: keep the pending camera file across a destroy/recreate
+        // while the camera app is open (see onCreate restore).
+        camFile?.let { outState.putString("camFile", it.absolutePath) }
+        camId?.let { outState.putString("camId", it) }
     }
 
     private fun buildUi() {
@@ -266,7 +286,12 @@ class MainActivity : Activity() {
                             val i = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
                             i.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
                             i.clipData = android.content.ClipData.newRawUri("photo", uri)
-                            i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            // v0.6.1: the camera app WRITES to EXTRA_OUTPUT, so
+                            // it needs the write grant too — read-only alone
+                            // left the capture unable to save the photo.
+                            i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                            TraceLog.log("attach", "camera start file=" + camFile!!.name)
                             try { startActivityForResult(i, REQ_CAMERA) }
                             catch (e: Exception) { Ui.toast(this, "No camera app found") }
                         }
@@ -674,7 +699,13 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) {
-            if (requestCode == REQ_CAMERA) { camFile?.delete(); camFile = null }
+            if (requestCode == REQ_CAMERA) {
+                // v0.6.1: never fail silently — the user pressed OK/back and
+                // got nothing, with no toast and no log line, before this.
+                TraceLog.log("attach", "camera cancelled/failed result=" + resultCode)
+                camFile?.delete(); camFile = null; camId = null
+                Ui.toast(this, "Photo was not saved — please try again")
+            }
             return
         }
         when (requestCode) {
@@ -685,20 +716,47 @@ class MainActivity : Activity() {
                 val id = camId
                 camFile = null
                 camId = null
-                if (f == null) return
-                if (!f.exists() || f.length() <= 0L) {
+                TraceLog.log("attach", "camera result file=" + (f?.name ?: "null") +
+                    " exists=" + (f?.exists() ?: false) + " size=" + (f?.length() ?: -1L))
+                if (f != null && (!f.exists() || f.length() <= 0L)) {
+                    // Some camera apps ignore EXTRA_OUTPUT and return a
+                    // thumbnail (or a content Uri) instead of writing the
+                    // file — recover that instead of attaching nothing.
                     val bmp = data?.extras?.get("data") as? android.graphics.Bitmap
                     if (bmp != null) {
-                        java.io.FileOutputStream(f).use {
-                            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it)
+                        try {
+                            f.parentFile?.mkdirs()
+                            java.io.FileOutputStream(f).use {
+                                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it)
+                            }
+                            TraceLog.log("attach", "camera thumbnail saved size=" + f.length())
+                        } catch (e: Exception) {
+                            TraceLog.log("attach", "camera thumbnail save failed: " + (e.message ?: ""))
                         }
                     }
                 }
-                if (f.exists() && f.length() > 0L) {
+                if (f != null && f.exists() && f.length() > 0L) {
                     Thread {
-                        val a = Attachments.registerCamera(this, id ?: "", f)
-                        runOnUiThread { pendingAtts.add(a); refreshChips() }
+                        // The file name itself is the id from newCameraFile,
+                        // so a lost camId is recovered from it.
+                        val attId = id ?: f.name.substringBefore('.')
+                        val a = Attachments.registerCamera(this, attId, f)
+                        runOnUiThread {
+                            pendingAtts.add(a)
+                            refreshChips()
+                            TraceLog.log("attach", "camera attached size=" + f.length())
+                        }
                     }.start()
+                } else {
+                    // Last resort: a content Uri returned in data.
+                    val u = data?.data
+                    if (u != null) {
+                        TraceLog.log("attach", "camera fallback importUri")
+                        importMany(listOf(u))
+                    } else {
+                        TraceLog.log("attach", "camera result empty — nothing to attach")
+                        Ui.toast(this, "Photo was not saved — please try again")
+                    }
                 }
             }
         }
@@ -1056,8 +1114,17 @@ class MainActivity : Activity() {
         scrollToBottom()
     }
 
+    /** Plain-words version of common provider errors — the raw JSON
+     *  ("unsupported input or output modalities") confuses users. */
+    private fun friendlyChatError(msg: String): String {
+        if (msg.contains("unsupported input or output modalities", ignoreCase = true))
+            return "This model doesn't accept images — try a vision model, or send without the photo."
+        return msg
+    }
+
     private fun failStream(msg: String, partial: String = "") {
         Store.log("chat error — " + msg)
+        val shown = friendlyChatError(msg)
         val c = conv ?: return
         flag = null
         setStreamingUI(false)
@@ -1070,7 +1137,7 @@ class MainActivity : Activity() {
             if (partial.isNotBlank()) last.content = partial
             if (last.content.isBlank()) c.messages.removeAt(c.messages.size - 1)
         }
-        c.messages.add(Msg("error", msg, System.currentTimeMillis()))
+        c.messages.add(Msg("error", shown, System.currentTimeMillis()))
         Store.touch(c)
         Store.save()
         chatAdapter?.notifyDataSetChanged()
