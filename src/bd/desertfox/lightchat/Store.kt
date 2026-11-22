@@ -26,6 +26,9 @@ object Store {
     private const val LOG_CAP = 200
     private var seeded = false
     private var loaded = false
+    // P0-2: set when a file failed to parse; saveNow() must never overwrite it.
+    private var configLoadFailed = false
+    private var chatsLoadFailed = false
 
     fun load(ctx: Context) {
         if (loaded) return
@@ -36,18 +39,36 @@ object Store {
         if (cf.exists()) {
             try {
                 val j = JSONObject(cf.readText())
-                settings = Settings.from(j.optJSONObject("settings") ?: JSONObject())
+                try { settings = Settings.from(j.optJSONObject("settings") ?: JSONObject()) } catch (e: Exception) {}
                 seeded = j.optBoolean("seeded", false)
                 val pa = j.optJSONArray("providers")
-                if (pa != null) for (i in 0 until pa.length()) providers.add(Provider.from(pa.getJSONObject(i)))
-            } catch (e: Exception) { }
+                // P0-2: one bad provider entry must not kill all providers.
+                if (pa != null) for (i in 0 until pa.length()) {
+                    try { providers.add(Provider.from(pa.getJSONObject(i))) }
+                    catch (e: Exception) { Store.log("skip corrupt provider entry " + i) }
+                }
+                backupFile(cf)
+            } catch (e: Exception) {
+                // Whole file unreadable: keep providers empty in memory, but
+                // never let a later save overwrite the (possibly recoverable) file.
+                configLoadFailed = true
+                Store.log("config.json corrupt — kept as-is, not overwriting")
+            }
         }
         val hf = File(ctx.filesDir, "chats.json")
         if (hf.exists()) {
             try {
                 val a = JSONArray(hf.readText())
-                for (i in 0 until a.length()) chats.add(Conversation.from(a.getJSONObject(i)))
-            } catch (e: Exception) { }
+                // P0-2: one bad chat entry must not kill all chats.
+                for (i in 0 until a.length()) {
+                    try { chats.add(Conversation.from(a.getJSONObject(i))) }
+                    catch (e: Exception) { Store.log("skip corrupt chat entry " + i) }
+                }
+                backupFile(hf)
+            } catch (e: Exception) {
+                chatsLoadFailed = true
+                Store.log("chats.json corrupt — kept as-is, not overwriting")
+            }
         }
         // Cleanup for the pre-0.1.3 reload bug: load() had no one-time guard, so
         // every screen open re-read the files and appended every provider/chat again.
@@ -89,26 +110,47 @@ object Store {
         }
     }
 
+    /** Keep a copy of the last good file, so a corrupt file can be recovered. */
+    private fun backupFile(f: File) {
+        try {
+            val bak = File(f.parentFile, f.name + ".bak")
+            f.copyTo(bak, overwrite = true)
+        } catch (e: Exception) {}
+    }
+
     /** Atomic tmp-file + rename write of both files. Call from onPause. */
     fun saveNow() {
         val ctx: Context
-        val cfgText: String
-        val chatsText: String
+        val cfgText: String?
+        val chatsText: String?
+        // P0-3: snapshot everything under the lock first. UI-thread mutations
+        // never take this lock, so serialising the live lists could throw
+        // ConcurrentModificationException on the save thread. The snapshot
+        // (lists + messages + attachments) is fully detached from live data.
         synchronized(lock) {
             saveScheduled = false
             lastSaveMs = System.currentTimeMillis()
             ctx = appCtx ?: return
-            val cj = JSONObject()
-            cj.put("providers", JSONArray(providers.map { it.toJson() }))
-            cj.put("settings", settings.toJson())
-            cj.put("seeded", seeded)
-            synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
-            cfgText = cj.toString()
-            chatsText = JSONArray(chats.map { it.toJson() }).toString()
+            val provSnap = ArrayList(providers)
+            val chatSnap = chats.map { c ->
+                Conversation(c.id, c.title, c.providerId, c.modelId, c.createdAt, c.updatedAt,
+                    c.messages.map { m -> Msg(m.role, m.content, m.ts, m.tokens, ArrayList(m.atts)) }.toMutableList())
+            }
+            cfgText = if (configLoadFailed) null else {
+                val cj = JSONObject()
+                cj.put("providers", JSONArray(provSnap.map { it.toJson() }))
+                cj.put("settings", settings.toJson())
+                cj.put("seeded", seeded)
+                synchronized(logLines) { cj.put("log", JSONArray(logLines)) }
+                cj.toString()
+            }
+            chatsText = if (chatsLoadFailed) null else
+                JSONArray(chatSnap.map { it.toJson() }).toString()
         }
         try {
-            atomicWrite(File(ctx.filesDir, "config.json"), cfgText)
-            atomicWrite(File(ctx.filesDir, "chats.json"), chatsText)
+            // P0-2: never overwrite a file whose load failed.
+            if (cfgText != null) atomicWrite(File(ctx.filesDir, "config.json"), cfgText)
+            if (chatsText != null) atomicWrite(File(ctx.filesDir, "chats.json"), chatsText)
         } catch (e: Exception) { }
     }
 

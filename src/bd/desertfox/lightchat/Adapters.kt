@@ -22,6 +22,7 @@ import android.widget.Toast
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.WeakHashMap
 
 object Ui {
     val BG = 0xFF14151A.toInt()
@@ -67,6 +68,9 @@ object Ui {
 /** Chat message list. View types: 0 user bubble, 1 assistant, 2 note / error. */
 class ChatAdapter(private val act: MainActivity, private val conv: Conversation) : BaseAdapter() {
 
+    // P1-1: cache the parsed markdown blocks per message, invalidated when
+    // the content changes — a streaming reply was re-parsed every 150 ms.
+    private val blockCache = WeakHashMap<Msg, Pair<String, List<Markdown.Block>>>()
     override fun getCount(): Int = conv.messages.size
     override fun getItem(position: Int): Msg = conv.messages[position]
     override fun getItemId(position: Int): Long = position.toLong()
@@ -190,7 +194,12 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         }
         root.removeAllViews()
 
-        for (block in Markdown.split(m.content)) {
+        val blocks = blockCache[m]?.takeIf { it.first == m.content }?.second
+            ?: Markdown.split(m.content).also {
+                if (blockCache.size > 200) blockCache.clear()
+                blockCache[m] = m.content to it
+            }
+        for (block in blocks) {
             if (block.code != null) {
                 root.addView(codeView(block.code))
             } else if (block.table != null) {
@@ -220,6 +229,16 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp.topMargin = Ui.dp(act, 2)
             root.addView(tk, lp)
+        }
+
+        // P0-1: thinking indicator while the placeholder is still blank, and
+        // a streaming cursor while text is arriving (last message only).
+        if (act.isStreaming() && position == getCount() - 1) {
+            if (m.content.isBlank()) {
+                root.addView(Ui.tv(act, "Thinking…", 14f, Ui.DIM))
+            } else {
+                root.addView(Ui.tv(act, "▍", 15f, Ui.ACCENT))
+            }
         }
 
         if (!act.isStreaming() && m.content.isNotBlank()) {
@@ -278,10 +297,13 @@ class ChatAdapter(private val act: MainActivity, private val conv: Conversation)
         iv.minimumHeight = Ui.dp(act, 60)
         iv.setOnClickListener { act.viewOutputImage(im.alt, im.url) }
         if (im.url.startsWith("data:")) {
-            val b = OutputKit.fromDataUrl(im.url)
-            if (b != null) {
-                iv.setImageBitmap(b)
-                iv.minimumHeight = 0
+            // P0-6: decode off the UI thread, sampled, cached per URL — the
+            // old code decoded full-res on every repaint.
+            OutputKit.loadDataUrl(act, im.url, 1200) { bmp ->
+                if (iv.tag == im.url && bmp != null) {
+                    iv.setImageBitmap(bmp)
+                    iv.minimumHeight = 0
+                }
             }
         } else {
             OutputKit.load(act, im.url, 1200) { bmp ->
@@ -430,7 +452,7 @@ class ProvidersAdapter(private val act: ProvidersActivity) : BaseAdapter() {
             it.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 16), Ui.dp(act, 10))
         }
         root.removeAllViews()
-        val name = Ui.tv(act, p.name.ifBlank { "(unnamed)" }, 15f, Ui.TEXT)
+        val name = Ui.tv(act, p.name.ifBlank { "(unnamed)" }, 15f, if (p.enabled) Ui.TEXT else Ui.DIM)
         name.typeface = Typeface.DEFAULT_BOLD
         root.addView(name)
         val url = Ui.tv(act, p.baseUrl, 12f, Ui.DIM)

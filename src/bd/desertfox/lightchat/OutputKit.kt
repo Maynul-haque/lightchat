@@ -43,8 +43,8 @@ object OutputKit {
         return if (e.length <= 5 && e.isNotEmpty() && e.matches(Regex("[a-zA-Z0-9]+"))) "." + e.lowercase() else ".png"
     }
 
-    /** Decode a data: URL to a bitmap, or null. */
-    fun fromDataUrl(u: String): Bitmap? {
+    /** Decode a data: URL to a bitmap, sampled to about maxPx, or null. */
+    fun fromDataUrl(u: String, maxPx: Int = 1200): Bitmap? {
         return try {
             if (!u.startsWith("data:")) return null
             val comma = u.indexOf(',')
@@ -53,8 +53,38 @@ object OutputKit {
             val data = u.substring(comma + 1)
             val bytes = if (meta.contains("base64")) Base64.decode(data, Base64.DEFAULT)
             else data.toByteArray(Charsets.UTF_8)
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            decodeSampled(bytes, maxPx)
         } catch (e: Exception) { null }
+    }
+
+    /** Sampled decode of raw image bytes (bounds first, then inSampleSize). */
+    private fun decodeSampled(bytes: ByteArray, maxPx: Int): Bitmap? {
+        return try {
+            val opts = BitmapFactory.Options()
+            opts.inJustDecodeBounds = true
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            if (opts.outWidth <= 0) return null
+            var s = 1
+            while (Math.max(opts.outWidth, opts.outHeight) / (s * 2) >= maxPx) s *= 2
+            opts.inSampleSize = s
+            opts.inJustDecodeBounds = false
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        } catch (e: Exception) { null }
+    }
+
+    // P0-6: in-memory cache for decoded data: URLs, so a model image is
+    // decoded once per session instead of on every repaint.
+    private val dataUrlCache = android.util.LruCache<String, Bitmap>(8)
+
+    /** Async sampled decode of a data: URL, cached per URL; cb on the UI thread. */
+    fun loadDataUrl(ctx: Context, url: String, maxPx: Int, cb: (Bitmap?) -> Unit) {
+        val cached = try { dataUrlCache.get(url) } catch (e: Exception) { null }
+        if (cached != null) { cb(cached); return }
+        Thread {
+            val b = fromDataUrl(url, maxPx)
+            if (b != null) try { dataUrlCache.put(url, b) } catch (e: Exception) {}
+            android.os.Handler(ctx.mainLooper).post { cb(b) }
+        }.start()
     }
 
     fun cacheFile(ctx: Context, url: String): File = File(cacheDir(ctx), md5(url) + extOf(url))
@@ -155,6 +185,22 @@ object OutputKit {
         return n
     }
 
+    /** P0-4: strip any path from a filename and keep only safe characters,
+     *  so a Content-Disposition like ../../config.json cannot escape the
+     *  downloads folder. */
+    fun sanitizeFileName(name: String): String {
+        var n = name.substringAfterLast('/').substringAfterLast('\\').trim()
+        n = n.replace("..", "")
+        val clean = StringBuilder()
+        for (c in n) {
+            if (c.isLetterOrDigit() || c == '.' || c == '-' || c == '_' || c == ' ') clean.append(c)
+        }
+        var out = clean.toString().trim().trim('.')
+        if (out.isEmpty()) out = "file"
+        if (out.length > 100) out = out.take(100)
+        return out
+    }
+
     /** Download to the app's downloads folder; cb gets the file or null. */
     fun download(ctx: Context, url: String, cb: (File?) -> Unit) {
         Thread {
@@ -172,6 +218,7 @@ object OutputKit {
                         if (m != null) name = m.groupValues[1].trim()
                     }
                     if (!name.contains('.')) name += "." + (fileExt(url) ?: "bin")
+                    name = sanitizeFileName(name)
                     val f = File(downloadsDir(ctx), System.currentTimeMillis().toString() + "_" + name)
                     c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it) } }
                     done = f

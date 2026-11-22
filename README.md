@@ -9,6 +9,7 @@ A lightweight, ChatGPT-style Android chat client for any OpenAI-compatible API. 
 - Model picker with search and horizontal provider filter chips
 - Chat with file and image attachments
 - PDF and DOCX text extraction (lightweight, no library)
+- v0.5.0 production readiness: live streaming display, corrupt-file protection with backups, crash-safe saves, download filename sanitising, attachment size cap, sampled/cached image decoding, history trimming, no forced scroll while reading
 - Fixed: user-message action buttons no longer overlap the message bubble (copy/edit stay in the long-press menu)
 - Per-provider custom headers (e.g. HTTP-Referer / X-Title for OpenRouter)
 - Markdown rendering: tables, code blocks (copy / save as file), blockquotes, nested lists

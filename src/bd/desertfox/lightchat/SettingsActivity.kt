@@ -105,7 +105,7 @@ class SettingsActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         label("About")
-        root.addView(Ui.tv(this, "LightChat 0.4.1", 14f, Ui.TEXT))
+        root.addView(Ui.tv(this, "LightChat " + BuildInfo.VERSION_NAME, 14f, Ui.TEXT))
         root.addView(Ui.tv(this, "bd.desertfox.lightchat", 12f, Ui.DIM))
         val note = Ui.tv(this,
             "No data leaves the phone except to your providers. Very long chats cost many tokens.",

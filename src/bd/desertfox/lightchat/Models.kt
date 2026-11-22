@@ -3,6 +3,14 @@ package bd.desertfox.lightchat
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Single source of truth for the app version.
+ *  build.sh must be kept in sync (aapt2 link --version-code/--version-name);
+ *  ChatClient.USER_AGENT and the Settings About line read this constant. */
+object BuildInfo {
+    const val VERSION_NAME = "0.5.0"
+    const val VERSION_CODE = 12
+}
+
 class Provider(
     val id: String,
     var name: String,
@@ -94,7 +102,10 @@ class Msg(val role: String, var content: String, val ts: Long, var tokens: Int =
             val m = Msg(j.optString("role"), j.optString("content"),
                 j.optLong("ts"), j.optInt("tokens", 0))
             val aa = j.optJSONArray("atts")
-            if (aa != null) for (i in 0 until aa.length()) m.atts.add(Att.from(aa.getJSONObject(i)))
+            // P0-2: one bad attachment entry must not kill the whole message.
+            if (aa != null) for (i in 0 until aa.length()) {
+                try { m.atts.add(Att.from(aa.getJSONObject(i))) } catch (e: Exception) {}
+            }
             return m
         }
     }
@@ -118,7 +129,12 @@ class Conversation(
         o.put("createdAt", createdAt)
         o.put("updatedAt", updatedAt)
         val a = JSONArray()
-        for (m in messages) if (m.role == "user" || m.role == "assistant") a.put(m.toJson())
+        // P1-7: blank assistant placeholders (streaming that never produced
+        // text, or a stream interrupted before any text) are never persisted.
+        for (m in messages) if (m.role == "user" || m.role == "assistant") {
+            if (m.role == "assistant" && m.content.isBlank()) continue
+            a.put(m.toJson())
+        }
         o.put("messages", a)
         return o
     }
@@ -127,7 +143,10 @@ class Conversation(
         fun from(j: JSONObject): Conversation {
             val l = ArrayList<Msg>()
             val a = j.optJSONArray("messages")
-            if (a != null) for (i in 0 until a.length()) l.add(Msg.from(a.getJSONObject(i)))
+            // P0-2: one corrupt message must not kill the whole conversation.
+            if (a != null) for (i in 0 until a.length()) {
+                try { l.add(Msg.from(a.getJSONObject(i))) } catch (e: Exception) {}
+            }
             return Conversation(j.optString("id"), j.optString("title"), j.optString("providerId"),
                 j.optString("modelId"), j.optLong("createdAt"), j.optLong("updatedAt"), l)
         }
